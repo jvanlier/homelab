@@ -4,7 +4,9 @@ blueprint:
     Hue Wall Switch for Zigbee2MQTT with hold-to-dim support.
 
     Short press (release): toggle light on/off.
-    Hold: dim light brightness. First hold dims down, next hold (within 5s) dims up, alternating.
+    Hold: dim light brightness. Initial dim direction is brightness-aware
+    (dims down when above threshold, up when at or below). Repeated holds
+    (within timeout) alternate direction.
 
     Supports multiple light entities per button and optional conditional light selection
     (e.g. different lights based on a binary sensor like darkness).
@@ -34,7 +36,7 @@ blueprint:
           unit_of_measurement: "%"
     direction_timeout:
       name: Direction timeout
-      description: Seconds after the last dim before direction resets to "down".
+      description: Seconds after the last dim before direction resets based on brightness.
       default: 5
       selector:
         number:
@@ -42,6 +44,18 @@ blueprint:
           max: 30
           step: 1
           unit_of_measurement: seconds
+    brightness_threshold:
+      name: Brightness threshold for initial dim direction
+      description: >
+        When dimming starts after timeout, dim down if brightness is above this
+        percentage, dim up if at or below.
+      default: 50
+      selector:
+        number:
+          min: 10
+          max: 90
+          step: 5
+          unit_of_measurement: "%"
 
     left_light:
       name: Left button light(s)
@@ -158,6 +172,7 @@ action:
       dim_direction_entity: "{{ dim_dir_left if side == 'left' else dim_dir_right }}"
       brightness_step_pct: !input brightness_step_pct
       direction_timeout: !input direction_timeout
+      brightness_threshold: !input brightness_threshold
       # Workaround: Some Hue wall switches occasionally emit left/right_press_release
       # instead of left/right_hold_release at the end of a hold sequence (firmware timing
       # bug when the button is released quickly after the last hold tick). Detect this by
@@ -187,7 +202,8 @@ action:
               prev_ts: "{{ parts[1] | int(0) if parts | length >= 2 else 0 }}"
               now_ts: "{{ now().timestamp() | int }}"
               timed_out: "{{ (now_ts - prev_ts) > direction_timeout }}"
-              current_dir: "{{ 'down' if timed_out else prev_dir }}"
+              current_brightness_pct: "{{ (state_attr(first_light, 'brightness') | float(0) / 255 * 100) | round(0) | int }}"
+              current_dir: "{{ ('down' if current_brightness_pct > brightness_threshold else 'up') if timed_out else prev_dir }}"
               step_value: "{{ brightness_step_pct | int if current_dir == 'up' else (brightness_step_pct | int * -1) }}"
           - repeat:
               for_each: "{{ active_lights }}"
@@ -216,7 +232,8 @@ action:
               prev_ts: "{{ parts[1] | int(0) if parts | length >= 2 else 0 }}"
               now_ts: "{{ now().timestamp() | int }}"
               timed_out: "{{ (now_ts - prev_ts) > direction_timeout }}"
-              current_dir: "{{ 'down' if timed_out else prev_dir }}"
+              current_brightness_pct: "{{ (state_attr(first_light, 'brightness') | float(0) / 255 * 100) | round(0) | int }}"
+              current_dir: "{{ ('down' if current_brightness_pct > brightness_threshold else 'up') if timed_out else prev_dir }}"
               next_dir: "{{ 'up' if current_dir == 'down' else 'down' }}"
           - action: input_text.set_value
             target:
