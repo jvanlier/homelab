@@ -3,21 +3,20 @@ set -eux
 
 PATH=$PATH:/usr/local/bin:/bin
 
-DATE=$(date +%Y-%m-%d)
-DATE_DELETE=$(date -d '-3 months' +%Y-%m-%d)
-FN_PREFIX=home_assistant_amb_dump
-FN=${FN_PREFIX}_${DATE}.tar
-FN_DELETE=${FN_PREFIX}_${DATE_DELETE}.tar
+# Use nullglob so the pattern expands to nothing if no files match
+shopt -s nullglob
+backups=(config/backups/*.tar)
+shopt -u nullglob
 
-echo "Date now: ${DATE}, filename now: ${FN}"
-echo "Date to delete: ${DATE_DELETE}, filename to delete: ${FN_DELETE}"
+# Check if the array is empty
+if [ ${#backups[@]} -eq 0 ]; then
+    echo "No backup found"
+    exit 1
+fi
 
-docker-compose stop
-sudo tar cvf ${FN} config/
-sudo chown jori:jori ${FN}
-pbzip2 ${FN}
-docker-compose up -d
+# Get the last backup from the sorted array
+LAST_BACKUP="${backups[-1]}"
+echo "Latest backup: $LAST_BACKUP"
 
-aws s3 cp ${FN}.bz2 s3://jvl-bak
-rm ${FN}.bz2
-aws s3 rm s3://jvl-bak/${FN_DELETE}
+# Write file to the same place each time
+aws s3 cp ${LAST_BACKUP} s3://jori-homelab-backup/home-assistant/backup.tar

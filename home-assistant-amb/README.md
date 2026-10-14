@@ -23,3 +23,11 @@ It catches things that the yaml checker in the pre-commit doesn't:
 ```sh
 just test
 ```
+
+## Backups
+
+Crontab entry for backups:
+
+```
+42 4 * * 0 cd /home/jori/infra-pi-home/home-assistant && ./backup.sh
+```
