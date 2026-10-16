@@ -18,12 +18,12 @@ if [ -n "${running_container}" ]; then
 fi
 
 mkdir -p backup
-tar -cf ${FN} --exclude='zigbee2mqtt-data/log' zigbee2mqtt-data
+tar -cf "${FN}" --exclude='zigbee2mqtt-data/log' zigbee2mqtt-data
 restart_zigbee2mqtt
 trap - EXIT
 
 # Parallel bzip2:
-pbzip2 ${FN}
+pbzip2 -f "${FN}"
 
-aws s3 cp ${FN}.bz2 s3://jori-homelab-backup/zigbee2mqtt/
-rm ${FN}.bz2
+aws s3 cp "${FN}.bz2" s3://jori-homelab-backup/zigbee2mqtt/
+rm "${FN}.bz2"
