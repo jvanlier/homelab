@@ -11,19 +11,34 @@
  * Scheduling: one prefix group (first word of friendly name) at a time,
  * alphabetical. Max CONCURRENCY_MAINS in flight (CONCURRENCY_BATTERY if the
  * group contains any non-Mains device). A device is done when: the update
- * response arrives, its state topic flips updating->idle (ok) or
- * updating->available (failed), or TIMEOUT_MIN elapses (stalled). Z2M has no
- * cross-device queue; this script enforces it.
+ * response arrives, or its state topic flips updating->idle (ok) or
+ * updating->available (failed). Z2M has no cross-device queue; this script
+ * enforces it.
+ *
+ * Stall handling: a device without a terminal signal after TIMEOUT_MIN is
+ * recorded as `stalled`. If it emitted any signal within ACTIVE_WINDOW_MIN
+ * (still transferring, just slow) its slot stays HELD until termination is
+ * confirmed, so the concurrency budget is never exceeded; otherwise the slot
+ * is released. A held device that then goes silent for STALL_SILENCE_MIN
+ * aborts the whole run (ABORT line, exit 3) — inspect the bridge; the final
+ * re-check establishes ground truth.
  *
  * Excluded: coordinator, disabled, interviewing, !supports_ota.
  *
  * Env: MQTT_URL (mqtt://127.0.0.1:1883), MQTT_BASE_TOPIC (zigbee2mqtt),
  *      CONCURRENCY_MAINS (5), CONCURRENCY_BATTERY (2), CHECK_CONCURRENCY (5),
- *      TIMEOUT_MIN (45), CHECK_TIMEOUT_S (60), REPORT_EVERY_MS (60000)
+ *      TIMEOUT_MIN (45), ACTIVE_WINDOW_MIN (10), STALL_SILENCE_MIN (30),
+ *      CHECK_TIMEOUT_S (60), REPORT_EVERY_MS (60000)
  *
  * Log protocol (one TAG per line):
- *   CONNECTED LIST CHECK CHECK_RESULT PLAN PENDING GROUP START DONE STATUS RESULT END ERROR
- * Exit codes: 0 = ok, 1 = setup/connection error, 3 = run completed with failures.
+ *   CONNECTED LIST CHECK CHECK_RESULT CHECK_FAILED PLAN PENDING GROUP START DONE STATUS RESULT END ABORT ERROR
+ *
+ * Exit codes:
+ *   0 = success (check: no pending and no failed checks; run: all ok)
+ *   1 = setup/connection error
+ *   3 = run completed with failures, or aborted on unconfirmed stall
+ *   4 = check completed but some checks failed — verification INCONCLUSIVE
+ *       (failed checks, e.g. asleep battery devices, cannot confirm state)
  */
 
 import mqtt from "mqtt";
@@ -34,6 +49,8 @@ const MAINS_CONC = Number(process.env.CONCURRENCY_MAINS || 5);
 const BATTERY_CONC = Number(process.env.CONCURRENCY_BATTERY || 2);
 const CHECK_CONC = Number(process.env.CHECK_CONCURRENCY || 5);
 const UPDATE_TIMEOUT_MS = Number(process.env.TIMEOUT_MIN || 45) * 60_000;
+const ACTIVE_WINDOW_MS = Number(process.env.ACTIVE_WINDOW_MIN || 10) * 60_000;
+const STALL_SILENCE_MS = Number(process.env.STALL_SILENCE_MIN || 30) * 60_000;
 const CHECK_TIMEOUT_MS = Number(process.env.CHECK_TIMEOUT_S || 60) * 1000;
 const REPORT_EVERY_MS = Number(process.env.REPORT_EVERY_MS || 60_000);
 
@@ -45,7 +62,7 @@ if (!["check", "run"].includes(mode)) {
   process.exit(2);
 }
 
-const log = (tag, ...args) => console.log(tag, ...args.filter((a) => a !== "" && a !== undefined).join(" "));
+const log = (tag, ...args) => console.log(tag, args.filter((a) => a !== "" && a !== undefined).join(" "));
 const startedAt = Date.now();
 const elapsed = () => {
   const s = Math.floor((Date.now() - startedAt) / 1000);
@@ -62,6 +79,7 @@ function lastQuotedName(err) {
 let phase = "setup"; // setup -> checking -> plan -> running -> done
 let gotDeviceList = false;
 let listTimer = null;
+let connectTimer = null;
 
 const devices = [];        // retained bridge/devices payload
 const meta = new Map();    // name -> { power, model, manufacturer }
@@ -69,7 +87,7 @@ const checkState = new Map(); // name -> { update_available, skipped?, error?, i
 const checkQueued = new Set();
 const checkInFlight = new Set();
 const checkTimers = new Map();
-const inFlight = new Map(); // name -> { startedAt, progress, lastState, timer }
+const inFlight = new Map(); // name -> { startedAt, progress, lastState, lastSignal, stalled, timer }
 const results = new Map();  // name -> { status: ok|failed|stalled, from?, to?, error?, via, durationMs }
 const groups = [];          // [{ prefix, names, queue, conc, battery }]
 let gi = 0;
@@ -77,9 +95,13 @@ let gi = 0;
 const client = mqtt.connect(URL, { reconnectPeriod: 2000, resubscribe: true });
 
 client.on("error", (e) => log("ERROR", `mqtt: ${e.message}`));
-setTimeout(() => die("not connected to MQTT broker within 30s — is the ssh tunnel up? (ssh -N -f -L 1883:127.0.0.1:1883 pi502)"), 30_000);
+connectTimer = setTimeout(
+  () => die("not connected to MQTT broker within 30s — is the ssh tunnel up? (ssh -N -f -L 1883:127.0.0.1:1883 pi502)"),
+  30_000,
+);
 
 client.on("connect", () => {
+  if (connectTimer) clearTimeout(connectTimer);
   client.subscribe([
     `${BASE}/bridge/devices`,
     `${BASE}/+`,
@@ -177,6 +199,16 @@ function onCheckResponse(obj) {
   }
 }
 
+/** Checks that never got an answer (timeout/error) — verification cannot rely on these. */
+function checkFailedNames() {
+  return devices
+    .map((d) => d.friendly_name)
+    .filter((name) => {
+      const cs = checkState.get(name);
+      return cs && !cs.skipped && cs.error;
+    });
+}
+
 function isPending(d) {
   const cs = checkState.get(d.friendly_name);
   return !d.disabled && d.type !== "Coordinator" && !d.interviewing && cs?.update_available === true;
@@ -185,6 +217,7 @@ function isPending(d) {
 function finishChecks() {
   phase = "plan";
   const pending = devices.filter(isPending).map((d) => d.friendly_name);
+  const checkFailed = checkFailedNames();
 
   const gmap = new Map();
   for (const name of pending) {
@@ -203,7 +236,8 @@ function finishChecks() {
     const st = cs.skipped ? "skipped" : cs.error ? `check-failed(${cs.error})` : cs.update_available ? "PENDING" : "up-to-date";
     log("CHECK_RESULT", d.friendly_name, st, `installed=${cs.installed_version ?? "?"}`, `latest=${cs.latest_version ?? "?"}`, d.model_id);
   }
-  log("PLAN", `pending=${pending.length} groups=${groups.length}`);
+  for (const name of checkFailed) log("CHECK_FAILED", name, `device did not answer its check (${checkState.get(name).error}) — cannot confirm its update state`);
+  log("PLAN", `pending=${pending.length} groups=${groups.length} check_failed=${checkFailed.length}`);
   for (const g of groups) log("PLAN", `group=${g.prefix} count=${g.names.length} concurrency=${g.conc} non_mains=${g.battery}`);
 
   if (mode === "check") {
@@ -213,23 +247,27 @@ function finishChecks() {
       log("PENDING", name, `model=${d?.model_id}`, `power=${d?.power_source}`, `installed=${cs?.installed_version ?? "?"}`, `latest=${cs?.latest_version ?? "?"}`, cs?.release_notes ?? "");
     }
     if (asJson) {
-      console.log("JSON", JSON.stringify(pending.map((name) => {
-        const d = devices.find((x) => x.friendly_name === name);
-        const cs = checkState.get(name) || {};
-        return {
-          name, model: d?.model_id, power_source: d?.power_source,
-          installed_version: cs.installed_version ?? null, latest_version: cs.latest_version ?? null,
-          release_notes: cs.release_notes ?? null, group: name.split(" ")[0],
-        };
-      })));
+      console.log("JSON", JSON.stringify({
+        pending: pending.map((name) => {
+          const d = devices.find((x) => x.friendly_name === name);
+          const cs = checkState.get(name) || {};
+          return {
+            name, model: d?.model_id, power_source: d?.power_source,
+            installed_version: cs.installed_version ?? null, latest_version: cs.latest_version ?? null,
+            release_notes: cs.release_notes ?? null, group: name.split(" ")[0],
+          };
+        }),
+        check_failed: checkFailed,
+      }));
     }
-    log("END", `check complete pending=${pending.length} took=${elapsed()}`);
-    process.exit(0);
+    log("END", `check complete pending=${pending.length} check_failed=${checkFailed.length} took=${elapsed()}`);
+    // >0 failed checks means part of the network is unverified: inconclusive, not a pass.
+    process.exit(checkFailed.length ? 4 : 0);
   }
 
   if (dryRun) {
-    log("END", "dry-run: no updates made");
-    process.exit(0);
+    log("END", `dry-run: no updates made check_failed=${checkFailed.length}`);
+    process.exit(checkFailed.length ? 4 : 0);
   }
 
   phase = "running";
@@ -249,33 +287,65 @@ function fire(name) {
     startedAt: Date.now(),
     progress: 0,
     lastState: "available",
-    timer: setTimeout(() => complete(name, "stalled", { error: `no completion signal within ${Math.round(UPDATE_TIMEOUT_MS / 60000)}m` }), UPDATE_TIMEOUT_MS),
+    lastSignal: Date.now(),
+    stalled: false,
+    timer: setTimeout(() => onTimeout(name), UPDATE_TIMEOUT_MS),
   });
   client.publish(`${BASE}/bridge/request/device/ota_update/update`, JSON.stringify({ id: name }));
   log("START", name);
 }
 
-function complete(name, status, extra = {}) {
-  if (results.has(name)) return;
+/**
+ * Per-device timeout: record `stalled`, but do NOT blindly free the slot.
+ * A device that is still emitting signals (slow transfer) keeps its slot
+ * until termination is confirmed, so the radio budget is never exceeded.
+ */
+function onTimeout(name) {
   const f = inFlight.get(name);
-  if (f) {
-    clearTimeout(f.timer);
-    inFlight.delete(name);
-  }
-  const durationMs = f ? Date.now() - f.startedAt : 0;
-  results.set(name, { status, via: "signal", ...extra, durationMs });
-  log("DONE", name, status, extra.from !== undefined && extra.to !== undefined ? `${extra.from}->${extra.to}` : "", extra.error ? `error=${extra.error}` : "", `took=${Math.round(durationMs / 1000)}s`);
+  if (!f || f.stalled) return;
+  f.stalled = true;
+  f.timer = null;
+  const silent = Date.now() - f.lastSignal > ACTIVE_WINDOW_MS;
+  results.set(name, {
+    status: "stalled",
+    error: silent ? `no completion signal within ${Math.round(UPDATE_TIMEOUT_MS / 60000)}m (silent)` : `no terminal signal within ${Math.round(UPDATE_TIMEOUT_MS / 60000)}m (still transferring, slot held)`,
+    via: "timeout",
+    durationMs: Date.now() - f.startedAt,
+  });
+  log("DONE", name, "stalled", silent ? "(slot released: no recent signals)" : "(slot held: still active)", `took=${Math.round((Date.now() - f.startedAt) / 1000)}s`);
+  if (silent) inFlight.delete(name);
   pump();
+}
+
+function complete(name, status, extra = {}) {
+  const f = inFlight.get(name);
+  if (!f) return; // terminal signal for a device no longer tracked — ignore
+  if (f.timer) clearTimeout(f.timer);
+  inFlight.delete(name);
+  const wasStalled = f.stalled || results.get(name)?.status === "stalled";
+  const durationMs = Date.now() - f.startedAt;
+  results.set(name, { status, via: "signal", ...extra, durationMs });
+  log("DONE", name, status, extra.from !== undefined && extra.to !== undefined ? `${extra.from}->${extra.to}` : "", extra.error ? `error=${extra.error}` : "", wasStalled ? "(confirmed after stall)" : "", `took=${Math.round(durationMs / 1000)}s`);
+  pump();
+}
+
+function touch(name) {
+  const f = inFlight.get(name);
+  if (f) f.lastSignal = Date.now();
 }
 
 function onUpdateResponse(obj) {
   if (obj.status === "ok" && obj.data?.id) {
     if (inFlight.has(obj.data.id)) {
+      touch(obj.data.id);
       complete(obj.data.id, "ok", { from: obj.data.from?.file_version, to: obj.data.to?.file_version, via: "response" });
     }
   } else if (obj.status === "error") {
     const name = lastQuotedName(obj.error);
-    if (name && inFlight.has(name)) complete(name, "failed", { error: obj.error, via: "response" });
+    if (name && inFlight.has(name)) {
+      touch(name);
+      complete(name, "failed", { error: obj.error, via: "response" });
+    }
   }
 }
 
@@ -294,6 +364,7 @@ function onDeviceState(name, body) {
 
   const f = inFlight.get(name);
   if (f) {
+    touch(name);
     const prev = f.lastState;
     f.lastState = u.state;
     if (u.state === "updating" && typeof u.progress === "number") f.progress = u.progress;
@@ -312,7 +383,8 @@ function onDeviceState(name, body) {
       g.queue = g.queue.filter((n) => n !== name);
       inFlight.set(name, {
         startedAt: Date.now(), progress: u.progress ?? 0, lastState: "updating",
-        timer: setTimeout(() => complete(name, "stalled", { error: "timeout (adopted)" }), UPDATE_TIMEOUT_MS),
+        lastSignal: Date.now(), stalled: false,
+        timer: setTimeout(() => onTimeout(name), UPDATE_TIMEOUT_MS),
       });
       log("START", name, "(adopted: already updating)");
       pump();
@@ -324,6 +396,8 @@ function pump() {
   if (phase !== "running") return;
   while (gi < groups.length) {
     const g = groups[gi];
+    // Held (stalled-but-active) devices stay in inFlight, so they keep
+    // consuming their slot and block group completion until they terminate.
     if (!g.queue.length && inFlight.size === 0) {
       const s = { ok: 0, failed: 0, stalled: 0 };
       for (const n of g.names) {
@@ -337,24 +411,40 @@ function pump() {
     while (inFlight.size < g.conc && g.queue.length) fire(g.queue.shift());
     return; // wait for completions
   }
-  if (inFlight.size === 0) finishRun();
+  if (inFlight.size === 0) finishRun(false);
 }
 
-function finishRun() {
+function finishRun(aborted) {
   phase = "done";
   for (const [name, r] of results) {
     log("RESULT", name, r.status, r.from !== undefined && r.to !== undefined ? `${r.from}->${r.to}` : "", r.error ?? "", `took=${Math.round(r.durationMs / 1000)}s`);
   }
+  // Aborted run: devices still in flight have no confirmed outcome — say so
+  // explicitly instead of letting them vanish from the summary.
+  for (const [name, f] of inFlight) {
+    log("RESULT", name, "unconfirmed", `progress=${f.progress ?? "?"}%`, "no terminal signal before abort — the re-check is authoritative");
+  }
   const failed = [...results.values()].filter((r) => r.status !== "ok");
-  log("END", `ok=${results.size - failed.length} failed=${failed.length} took=${elapsed()}`);
-  process.exit(failed.length ? 3 : 0);
+  log("END", `ok=${results.size - failed.length} failed=${failed.length} aborted=${aborted ? "yes" : "no"} check_failed=${checkFailedNames().length} took=${elapsed()}`);
+  process.exit(aborted || failed.length ? 3 : 0);
 }
 
-// Periodic status while updates run: group, done count, in-flight progress.
+// Periodic status while updates run + stall backstop.
 setInterval(() => {
-  if (phase !== "running" || !inFlight.size) return;
+  if (phase !== "running") return;
+  // Backstop: a held (stalled) device that has gone silent is not transferring;
+  // the bridge may be wedged — stop the run and require intervention rather
+  // than guessing outcomes.
+  for (const [name, f] of inFlight) {
+    if (f.stalled && Date.now() - f.lastSignal > STALL_SILENCE_MS) {
+      log("ABORT", `held device '${name}' still unconfirmed and silent for ${Math.round(STALL_SILENCE_MS / 60000)}m — stopping run, inspect the bridge`);
+      finishRun(true);
+      return;
+    }
+  }
+  if (!inFlight.size) return;
   const g = groups[gi];
   const done = g ? g.names.filter((n) => results.has(n)).length : 0;
-  const parts = [...inFlight].map(([n, f]) => `${n}=${f.progress ?? "?"}%`).join(" ");
+  const parts = [...inFlight].map(([n, f]) => `${n}=${f.progress ?? "?"}%${f.stalled ? " (stalled, slot held)" : ""}`).join(" ");
   log("STATUS", `group=${g?.prefix ?? "?"} done=${done}/${g?.names.length ?? "?"} in_flight=${inFlight.size} total_done=${results.size} elapsed=${elapsed()} | ${parts}`);
 }, REPORT_EVERY_MS);

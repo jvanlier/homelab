@@ -14,7 +14,11 @@ Staggered OTA updates for the home Zigbee2MQTT bridge. Z2M 2.x has **no REST API
 
 ## Runner
 
-[reference/ota-runner.mjs](reference/ota-runner.mjs) — implements discovery, staggering, all waiting, and log-based reporting. Env knobs (defaults are correct, only change on request): `CONCURRENCY_MAINS` (5), `CONCURRENCY_BATTERY` (2), `TIMEOUT_MIN` (45), `CHECK_TIMEOUT_S` (60).
+[reference/ota-runner.mjs](reference/ota-runner.mjs) — implements discovery, staggering, all waiting, and log-based reporting (`START`/`DONE`/`STATUS`/`RESULT`/`END` lines; `--json` on `check` adds a machine-readable `JSON` line).
+
+- A device is **done** when its MQTT update response arrives, or its state topic flips `updating`→`idle` (ok) / back to `available` (failed), or it gets no terminal signal for `TIMEOUT_MIN` (45 min): it is then marked `stalled`. If it is still emitting progress its slot stays **held** until termination is confirmed, so the concurrency budget is never exceeded; if it is silent its slot is released. A held device that then goes silent for 30 min **aborts the whole run** (`ABORT` line, exit 3) — the bridge needs a look.
+- It automatically excludes the coordinator, disabled, interviewing, and non-OTA-capable devices; battery/sleepy devices use the lower concurrency.
+- Exit codes: `0` ok · `1` connection error · `3` run finished with failures or aborted · `4` check finished but some checks failed (verification **inconclusive** — those devices' state is unknown). Env knobs (defaults are correct, only change on request): `CONCURRENCY_MAINS` (5), `CONCURRENCY_BATTERY` (2), `TIMEOUT_MIN` (45), `CHECK_TIMEOUT_S` (60); stall windows are in the script header.
 
 ## Workflow
 
@@ -33,7 +37,7 @@ npm init -y >/dev/null 2>&1 && npm install mqtt --no-audit --no-fund
 nohup node ota-runner.mjs check --json > check.log 2>&1 &
 ```
 
-Takes a few minutes (one read-only check per device; asleep battery devices run until timeout). Tail `check.log`; when you see `END`, present to the user: pending count, per-`PLAN` groups (name, size, concurrency, non-mains count), and the `PENDING` lines (device, installed → latest). Also flag any `check-failed` devices. **Wait for explicit approval before step 3.**
+Takes a few minutes (one read-only check per device; asleep battery devices run until timeout). Tail `check.log`; when you see `END`, present to the user: pending count, per-`PLAN` groups (name, size, concurrency, non-mains count), and the `PENDING` lines (device, installed → latest). `END` reports `check_failed=N` — devices that never answered their check (usually asleep battery devices) cannot confirm their state, so flag them as **unverified**, not up-to-date. **Wait for explicit approval before step 3.**
 
 ### 3. Run (background, unattended)
 
@@ -41,7 +45,7 @@ Takes a few minutes (one read-only check per device; asleep battery devices run 
 nohup node ota-runner.mjs run > run.log 2>&1 &
 ```
 
-The script does all the waiting itself: one prefix group (first word of the friendly name) at a time, alphabetical; max 5 in flight per group (2 if it contains any non-mains device); a device completes when the MQTT update response arrives, or its state topic flips `updating`→`idle` (ok) / back to `available` (failed), or after 45 min (stalled). Slots free as devices finish. It automatically excludes the coordinator, disabled, interviewing, and non-OTA-capable devices. A failed battery-device OTA usually self-heals on its next wake; worst case is re-pairing.
+The script does all the waiting itself: one prefix group (first word of the friendly name) at a time, alphabetical; max 5 in flight per group (2 if it contains any non-mains device); slots free only when a device's outcome is confirmed (see Runner). It automatically excludes the coordinator, disabled, interviewing, and non-OTA-capable devices. A failed battery-device OTA usually self-heals on its next wake; worst case is re-pairing.
 
 ### 4. Poll and report (you do this)
 
@@ -50,17 +54,19 @@ Poll `run.log` (e.g. `tail -25 run.log`) every 5–10 minutes. Report to the use
 - at start: the plan (groups, sizes, expected duration)
 - after each `GROUP` line: which group finished, its ok/failed/stalled counts, elapsed
 - immediately on any `DONE … failed` or `stalled`
+- immediately on any `ABORT` or `ERROR` (the run has stopped — tell the user the bridge needs a look; do not restart anything)
 - every 15 min while a group is still running: the latest `STATUS` line (in-flight devices + progress %), elapsed, rough remaining
 - at `END`: the full `RESULT` table (device, status, from→to version, duration) plus the list of failed/stalled devices
 
 ### 5. Verify and clean up
 
 ```bash
-nohup node ota-runner.mjs check > recheck.log 2>&1 &   # authoritative verification
-pkill -f "ssh -N -f -L 1883"                            # after the re-check
+nohup node ota-runner.mjs check > recheck.log 2>&1 &
 ```
 
-The re-check `PENDING` list must be empty (or match intentionally skipped devices). If the run had failures/stalls, tell the user they remain on their old firmware and offer a retry pass — a plain `run` re-checks first, so only stragglers get updated.
+**Keep the tunnel up and poll `recheck.log`** (same cadence as step 2) until you see its `END` line — only *then* run `pkill -f "ssh -N -f -L 1883"`. Killing the tunnel first makes the re-check fail and the verification meaningless.
+
+Verification **passes** only if `END` shows `check_failed=0` **and** the `PENDING` list is empty (or matches intentionally skipped devices). If `check_failed > 0` (usually asleep battery devices) the verification is **inconclusive, not a pass**: list those devices, say they could not be confirmed up-to-date, and offer a re-check later. Include the final `RESULT` table (device, status, from→to, duration); if anything failed/stalled, tell the user those devices remain on the old firmware and offer a retry pass — a plain `run` re-checks first, so only stragglers get updated.
 
 ## MQTT reference (only if the script fails and you must debug)
 
