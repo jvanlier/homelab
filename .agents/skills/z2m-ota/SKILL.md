@@ -16,7 +16,7 @@ Staggered OTA updates for the home Zigbee2MQTT bridge. Z2M 2.x has **no REST API
 
 [reference/ota-runner.mjs](reference/ota-runner.mjs) — implements discovery, staggering, all waiting, and log-based reporting (`START`/`DONE`/`STATUS`/`RESULT`/`END` lines; `--json` on `check` adds a machine-readable `JSON` line).
 
-- A device is **done** when its MQTT update response arrives, or its state topic flips `updating`→`idle` (ok) / back to `available` (failed), or it gets no terminal signal for `TIMEOUT_MIN` (45 min): it is then marked `stalled`. If it is still emitting progress its slot stays **held** until termination is confirmed, so the concurrency budget is never exceeded; if it is silent its slot is released. A held device that then goes silent for 30 min **aborts the whole run** (`ABORT` line, exit 3) — the bridge needs a look.
+- A device is **done** when its MQTT update response arrives, or its state topic flips `updating`→`idle` (ok) / back to `available` (failed). A device with no terminal signal for `TIMEOUT_MIN` (45 min) is marked `stalled`; its slot stays **held** until the outcome is confirmed — a lost MQTT connection can hide an ongoing transfer, so the slot is never released on silence (that would let the bridge exceed its radio budget when connectivity returns). A stalled device that then stays silent for 30 min **aborts the whole run** (`ABORT` line, exit 3) — the bridge needs a look, and the final re-check establishes ground truth.
 - It automatically excludes the coordinator, disabled, interviewing, and non-OTA-capable devices; battery/sleepy devices use the lower concurrency.
 - Exit codes: `0` ok · `1` connection error · `3` run finished with failures or aborted · `4` check finished but some checks failed (verification **inconclusive** — those devices' state is unknown). Env knobs (defaults are correct, only change on request): `CONCURRENCY_MAINS` (5), `CONCURRENCY_BATTERY` (2), `TIMEOUT_MIN` (45), `CHECK_TIMEOUT_S` (60); stall windows are in the script header.
 
@@ -54,7 +54,7 @@ Poll `run.log` (e.g. `tail -25 run.log`) every 5–10 minutes. Report to the use
 - at start: the plan (groups, sizes, expected duration)
 - after each `GROUP` line: which group finished, its ok/failed/stalled counts, elapsed
 - immediately on any `DONE … failed` or `stalled`
-- immediately on any `ABORT` or `ERROR` (the run has stopped — tell the user the bridge needs a look; do not restart anything)
+- immediately on any `ABORT` or `ERROR` (the run has stopped — report the `RESULT` lines it emitted: `stalled` = unconfirmed outcome, `unconfirmed` = was updating, `unstarted` = never ran; tell the user the bridge needs a look; do not restart anything)
 - every 15 min while a group is still running: the latest `STATUS` line (in-flight devices + progress %), elapsed, rough remaining
 - at `END`: the full `RESULT` table (device, status, from→to version, duration) plus the list of failed/stalled devices
 
@@ -66,7 +66,7 @@ nohup node ota-runner.mjs check > recheck.log 2>&1 &
 
 **Keep the tunnel up and poll `recheck.log`** (same cadence as step 2) until you see its `END` line — only *then* run `pkill -f "ssh -N -f -L 1883"`. Killing the tunnel first makes the re-check fail and the verification meaningless.
 
-Verification **passes** only if `END` shows `check_failed=0` **and** the `PENDING` list is empty (or matches intentionally skipped devices). If `check_failed > 0` (usually asleep battery devices) the verification is **inconclusive, not a pass**: list those devices, say they could not be confirmed up-to-date, and offer a re-check later. Include the final `RESULT` table (device, status, from→to, duration); if anything failed/stalled, tell the user those devices remain on the old firmware and offer a retry pass — a plain `run` re-checks first, so only stragglers get updated.
+Verification **passes** only if `END` shows `check_failed=0` **and** the `PENDING` list is empty (or matches intentionally skipped devices). If `check_failed > 0` (usually asleep battery devices) the verification is **inconclusive, not a pass**: list those devices, say they could not be confirmed up-to-date, and offer a re-check later. Include the final `RESULT` table (device, status, from→to, duration). Failed devices remain on the old firmware; **stalled** devices' firmware is *unknown* — the update may have succeeded but its completion signal never reached the runner, so only the re-check can confirm. Offer a retry pass for anything failed/stalled/unconfirmed — a plain `run` re-checks first, so only devices that are actually still behind get updated.
 
 ## MQTT reference (only if the script fails and you must debug)
 

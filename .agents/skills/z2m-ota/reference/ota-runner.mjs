@@ -16,12 +16,15 @@
  * enforces it.
  *
  * Stall handling: a device without a terminal signal after TIMEOUT_MIN is
- * recorded as `stalled`. If it emitted any signal within ACTIVE_WINDOW_MIN
- * (still transferring, just slow) its slot stays HELD until termination is
- * confirmed, so the concurrency budget is never exceeded; otherwise the slot
- * is released. A held device that then goes silent for STALL_SILENCE_MIN
- * aborts the whole run (ABORT line, exit 3) — inspect the bridge; the final
- * re-check establishes ground truth.
+ * recorded as `stalled`. Its concurrency slot stays HELD: absence of signal
+ * is NOT confirmation — a dropped MQTT connection hides ongoing transfers,
+ * so releasing the slot on silence would let the bridge exceed its radio
+ * budget when connectivity returns. The slot is released only when a
+ * terminal signal (update response, or an updating->idle/available state
+ * flip) confirms the outcome, even if it arrives after the stall. If a
+ * stalled device stays silent for STALL_SILENCE_MIN, the run ABORTS (ABORT
+ * line, exit 3) — inspect the bridge; the final re-check establishes
+ * ground truth.
  *
  * Excluded: coordinator, disabled, interviewing, !supports_ota.
  *
@@ -32,6 +35,7 @@
  *
  * Log protocol (one TAG per line):
  *   CONNECTED LIST CHECK CHECK_RESULT CHECK_FAILED PLAN PENDING GROUP START DONE STATUS RESULT END ABORT ERROR
+ *   (RESULT status: ok | failed | stalled | unconfirmed | unstarted)
  *
  * Exit codes:
  *   0 = success (check: no pending and no failed checks; run: all ok)
@@ -63,6 +67,7 @@ if (!["check", "run"].includes(mode)) {
 }
 
 const log = (tag, ...args) => console.log(tag, args.filter((a) => a !== "" && a !== undefined).join(" "));
+const fmtDur = (ms) => (ms >= 60_000 ? `${Math.round(ms / 60000)}m` : `${Math.max(1, Math.round(ms / 1000))}s`);
 const startedAt = Date.now();
 const elapsed = () => {
   const s = Math.floor((Date.now() - startedAt) / 1000);
@@ -296,9 +301,10 @@ function fire(name) {
 }
 
 /**
- * Per-device timeout: record `stalled`, but do NOT blindly free the slot.
- * A device that is still emitting signals (slow transfer) keeps its slot
- * until termination is confirmed, so the radio budget is never exceeded.
+ * Per-device timeout: record `stalled`, and keep the slot. Absence of a
+ * terminal signal is not confirmation — a lost MQTT connection hides ongoing
+ * transfers, so the slot is released only on a confirmed outcome; if the
+ * device stays silent the backstop aborts the run instead.
  */
 function onTimeout(name) {
   const f = inFlight.get(name);
@@ -308,12 +314,12 @@ function onTimeout(name) {
   const silent = Date.now() - f.lastSignal > ACTIVE_WINDOW_MS;
   results.set(name, {
     status: "stalled",
-    error: silent ? `no completion signal within ${Math.round(UPDATE_TIMEOUT_MS / 60000)}m (silent)` : `no terminal signal within ${Math.round(UPDATE_TIMEOUT_MS / 60000)}m (still transferring, slot held)`,
+    error: `no terminal signal within ${fmtDur(UPDATE_TIMEOUT_MS)}${silent ? " (silent)" : " (still active)"}`,
     via: "timeout",
     durationMs: Date.now() - f.startedAt,
   });
-  log("DONE", name, "stalled", silent ? "(slot released: no recent signals)" : "(slot held: still active)", `took=${Math.round((Date.now() - f.startedAt) / 1000)}s`);
-  if (silent) inFlight.delete(name);
+  // Slot stays held (inFlight unchanged) until the outcome is confirmed.
+  log("DONE", name, "stalled", `slot held${silent ? ": no recent signals" : ": still active"}`, `took=${Math.round((Date.now() - f.startedAt) / 1000)}s`);
   pump();
 }
 
@@ -396,8 +402,9 @@ function pump() {
   if (phase !== "running") return;
   while (gi < groups.length) {
     const g = groups[gi];
-    // Held (stalled-but-active) devices stay in inFlight, so they keep
-    // consuming their slot and block group completion until they terminate.
+    // Stalled devices (silent or slow) keep their slots until their outcome
+    // is confirmed, so they block group completion and new starts — the
+    // radio budget is never exceeded.
     if (!g.queue.length && inFlight.size === 0) {
       const s = { ok: 0, failed: 0, stalled: 0 };
       for (const n of g.names) {
@@ -419,14 +426,28 @@ function finishRun(aborted) {
   for (const [name, r] of results) {
     log("RESULT", name, r.status, r.from !== undefined && r.to !== undefined ? `${r.from}->${r.to}` : "", r.error ?? "", `took=${Math.round(r.durationMs / 1000)}s`);
   }
-  // Aborted run: devices still in flight have no confirmed outcome — say so
-  // explicitly instead of letting them vanish from the summary.
+  // Aborted run: devices still in flight without a recorded outcome have no
+  // confirmation — say so explicitly instead of letting them vanish from
+  // the summary. (Stalled devices already have a RESULT line; skip them to
+  // avoid duplicates.)
   for (const [name, f] of inFlight) {
+    if (results.has(name)) continue;
     log("RESULT", name, "unconfirmed", `progress=${f.progress ?? "?"}%`, "no terminal signal before abort — the re-check is authoritative");
   }
-  const failed = [...results.values()].filter((r) => r.status !== "ok");
-  log("END", `ok=${results.size - failed.length} failed=${failed.length} aborted=${aborted ? "yes" : "no"} check_failed=${checkFailedNames().length} took=${elapsed()}`);
-  process.exit(aborted || failed.length ? 3 : 0);
+  // Queued devices the run never reached.
+  let unstarted = 0;
+  for (const g of groups) {
+    for (const name of g.queue) {
+      if (results.has(name)) continue;
+      unstarted++;
+      log("RESULT", name, "unstarted", "run stopped before this device started — the re-check is authoritative");
+    }
+  }
+  const ok = [...results.values()].filter((r) => r.status === "ok").length;
+  const failed = [...results.values()].filter((r) => r.status === "failed").length;
+  const stalled = [...results.values()].filter((r) => r.status === "stalled").length;
+  log("END", `ok=${ok} failed=${failed} stalled=${stalled} unstarted=${unstarted} aborted=${aborted ? "yes" : "no"} check_failed=${checkFailedNames().length} took=${elapsed()}`);
+  process.exit(aborted || failed + stalled > 0 ? 3 : 0);
 }
 
 // Periodic status while updates run + stall backstop.
@@ -437,7 +458,7 @@ setInterval(() => {
   // than guessing outcomes.
   for (const [name, f] of inFlight) {
     if (f.stalled && Date.now() - f.lastSignal > STALL_SILENCE_MS) {
-      log("ABORT", `held device '${name}' still unconfirmed and silent for ${Math.round(STALL_SILENCE_MS / 60000)}m — stopping run, inspect the bridge`);
+      log("ABORT", `held device '${name}' still unconfirmed and silent for ${fmtDur(STALL_SILENCE_MS)} — stopping run, inspect the bridge`);
       finishRun(true);
       return;
     }
