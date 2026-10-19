@@ -15,6 +15,8 @@ services:
     environment:
       - TZ=Europe/Amsterdam
       - WEBPASSWORD=${WEBPASSWORD}
+      # Since pihole v6 it only accepts connections within Docker by default:
+      - FTLCONF_dns_listeningMode=ALL
     # Volumes store your data between container upgrades
     volumes:
       - './etc-pihole:/etc/pihole'
