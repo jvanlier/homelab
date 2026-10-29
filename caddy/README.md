@@ -19,3 +19,9 @@ Caddy runs on pi502 and routes the four DNS names to services on the same Pi. It
 6. In TeslaMate, set **Settings → URLs** to `http://tm.<domain>` for the web app and `http://tm-grafana.<domain>` for dashboards.
 
 The Duux MQTT broker continues to use port 443.
+
+## TransIP credentials for HTTPS
+
+To prepare for DNS-based certificate issuance, set `TRANSIP_LOGIN` in `.env` and save the private key generated in the TransIP control panel as `transip-private-key.pem`. The `.pem.example` file shows the expected format. Both files are ignored by git; keep the private key readable only by its owner (`chmod 600 transip-private-key.pem`).
+
+These credentials are not used by the current HTTP configuration; the TransIP plugin and HTTPS still need to be configured.
