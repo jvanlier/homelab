@@ -1,19 +1,20 @@
-http://hass.{$DOMAIN} {
-	bind 100.88.31.116
+{
+	default_bind 100.88.31.116
+	acme_dns transip {env.TRANSIP_LOGIN} /run/secrets/transip-private-key.pem
+}
+
+hass.{$DOMAIN} {
 	reverse_proxy 127.0.0.1:8123
 }
 
-http://tm.{$DOMAIN} {
-	bind 100.88.31.116
+tm.{$DOMAIN} {
 	reverse_proxy 127.0.0.1:4000
 }
 
-http://tm-grafana.{$DOMAIN} {
-	bind 100.88.31.116
+tm-grafana.{$DOMAIN} {
 	reverse_proxy 127.0.0.1:3000
 }
 
-http://z2m.{$DOMAIN} {
-	bind 100.88.31.116
+z2m.{$DOMAIN} {
 	reverse_proxy 127.0.0.1:8002
 }

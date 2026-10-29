@@ -5,7 +5,7 @@ services:
     restart: unless-stopped
     ports:
       # LAN MQTT-TLS: fans connect here (DNS-hijacked from collector3.cloudgarden.nl:443)
-      - "443:8883"
+      - "192.168.1.138:443:8883"
       # EMQX dashboard: loopback-only, access via SSH tunnel
       - "127.0.0.1:18083:18083"
     volumes:
