@@ -13,8 +13,9 @@
  * group contains any non-Mains device). A device is done when: the update
  * response arrives, or its state topic flips updating->idle (ok) or
  * updating->available (failed). Only devices in the approved check are run.
- * Z2M has no cross-device queue; this script
- * enforces it.
+ * Z2M has no cross-device queue. An incomplete preflight or an observed
+ * external transfer aborts the run; state topics are not retained, so check
+ * the UI for ongoing transfers before starting.
  *
  * Stall handling: a device without a terminal signal after TIMEOUT_MIN is
  * recorded as `stalled`. Its concurrency slot stays HELD: absence of signal
@@ -42,7 +43,7 @@
  *   0 = success (check: no pending and no failed checks; run: all ok)
  *   1 = setup/connection error
  *   3 = run completed with failures, or aborted on unconfirmed stall
- *   4 = check completed but some checks failed — verification INCONCLUSIVE
+ *   4 = check or run preflight has failed checks — state INCONCLUSIVE
  *       (failed checks, e.g. asleep battery devices, cannot confirm state)
  */
 
@@ -122,6 +123,7 @@ const checkQueued = new Set();
 const checkInFlight = new Set();
 const checkTimers = new Map();
 const inFlight = new Map(); // name -> { startedAt, progress, lastState, lastSignal, stalled, timer }
+const externalTransfers = new Set(); // updating devices not started by this runner
 const results = new Map();  // name -> { status: ok|failed|stalled, from?, to?, error?, via, durationMs }
 const groups = [];          // [{ prefix, names, queue, conc, battery }]
 let gi = 0;
@@ -185,11 +187,20 @@ function beginChecks() {
   phase = "checking";
   for (const d of devices) {
     const name = d.friendly_name;
-    if (d.type === "Coordinator" || d.disabled || d.interviewing || !d.definition?.supports_ota || (approved && !approved.has(name))) {
+    if (d.type === "Coordinator" || d.disabled || d.interviewing || !d.definition?.supports_ota) {
+      checkState.set(name, approved?.has(name)
+        ? { error: "approved device is not eligible for OTA" }
+        : { update_available: false, skipped: true });
+      continue;
+    }
+    if (approved && !approved.has(name)) {
       checkState.set(name, { update_available: false, skipped: true });
       continue;
     }
     checkQueued.add(name);
+  }
+  for (const name of approved ?? []) {
+    if (!meta.has(name)) checkState.set(name, { error: "approved device is missing from the bridge" });
   }
   log("CHECK", `starting eligible=${checkQueued.size}`);
   pumpChecks();
@@ -235,12 +246,7 @@ function onCheckResponse(obj) {
 
 /** Checks that never got an answer (timeout/error) — verification cannot rely on these. */
 function checkFailedNames() {
-  return devices
-    .map((d) => d.friendly_name)
-    .filter((name) => {
-      const cs = checkState.get(name);
-      return cs && !cs.skipped && cs.error;
-    });
+  return [...checkState].filter(([, cs]) => !cs.skipped && cs.error).map(([name]) => name);
 }
 
 function isPending(d) {
@@ -270,7 +276,7 @@ function finishChecks() {
     const st = cs.skipped ? "skipped" : cs.error ? `check-failed(${cs.error})` : cs.update_available ? "PENDING" : "up-to-date";
     log("CHECK_RESULT", d.friendly_name, st, `installed=${cs.installed_version ?? "?"}`, `latest=${cs.latest_version ?? "?"}`, d.model_id);
   }
-  for (const name of checkFailed) log("CHECK_FAILED", name, `device did not answer its check (${checkState.get(name).error}) — cannot confirm its update state`);
+  for (const name of checkFailed) log("CHECK_FAILED", name, `check could not be completed (${checkState.get(name).error}) — cannot confirm its update state`);
   log("PLAN", `pending=${pending.length} groups=${groups.length} check_failed=${checkFailed.length}`);
   for (const g of groups) log("PLAN", `group=${g.prefix} count=${g.names.length} concurrency=${g.conc} non_mains=${g.battery}`);
 
@@ -299,18 +305,25 @@ function finishChecks() {
     process.exit(checkFailed.length ? 4 : 0);
   }
 
+  if (checkFailed.length || externalTransfers.size) {
+    log("ABORT", "preflight incomplete or another update is in progress — no updates started");
+    for (const name of checkFailed) log("RESULT", name, "unconfirmed", `preflight check failed: ${checkState.get(name).error}`);
+    for (const name of externalTransfers) {
+      if (!checkFailed.includes(name)) log("RESULT", name, "unconfirmed", "update already in progress");
+    }
+    for (const name of pending) {
+      if (!externalTransfers.has(name)) log("RESULT", name, "unstarted", "preflight did not complete safely");
+    }
+    log("END", `ok=0 failed=0 stalled=0 unstarted=${pending.filter((name) => !externalTransfers.has(name)).length} aborted=yes check_failed=${checkFailed.length} took=${elapsed()}`);
+    process.exit(checkFailed.length ? 4 : 3);
+  }
+
   if (dryRun) {
-    log("END", `dry-run: no updates made check_failed=${checkFailed.length}`);
-    process.exit(checkFailed.length ? 4 : 0);
+    log("END", "dry-run: no updates made check_failed=0");
+    process.exit(0);
   }
 
   phase = "running";
-  // Devices already updating (e.g. started from the UI) count against the budget.
-  for (const [name, f] of inFlight) {
-    const g = groups.find((g) => g.queue.includes(name));
-    if (g) g.queue = g.queue.filter((n) => n !== name);
-    log("START", name, "(already in progress, adopted)");
-  }
   pump();
 }
 
@@ -319,6 +332,7 @@ function finishChecks() {
 function fire(name) {
   inFlight.set(name, {
     startedAt: Date.now(),
+    from: checkState.get(name)?.installed_version,
     progress: 0,
     lastState: "available",
     lastSignal: Date.now(),
@@ -360,8 +374,9 @@ function complete(name, status, extra = {}) {
   inFlight.delete(name);
   const wasStalled = f.stalled || results.get(name)?.status === "stalled";
   const durationMs = Date.now() - f.startedAt;
-  results.set(name, { status, via: "signal", ...extra, durationMs });
-  log("DONE", name, status, extra.from !== undefined && extra.to !== undefined ? `${extra.from}->${extra.to}` : "", extra.error ? `error=${extra.error}` : "", wasStalled ? "(confirmed after stall)" : "", `took=${Math.round(durationMs / 1000)}s`);
+  const from = extra.from ?? f.from;
+  results.set(name, { status, via: "signal", ...extra, from, durationMs });
+  log("DONE", name, status, from !== undefined && extra.to !== undefined ? `${from}->${extra.to}` : "", extra.error ? `error=${extra.error}` : "", wasStalled ? "(confirmed after stall)" : "", `took=${Math.round(durationMs / 1000)}s`);
   pump();
 }
 
@@ -391,11 +406,12 @@ function onDeviceState(name, body) {
   const u = obj.update;
   if (!u || typeof u !== "object") return;
 
-  const rec = checkState.get(name);
-  if (rec && !rec.skipped) {
+  const rec = checkState.get(name) ?? {};
+  if (!rec.skipped) {
     if (u.installed_version !== undefined) rec.installed_version = u.installed_version;
     if (u.latest_version !== undefined) rec.latest_version = u.latest_version;
     if (u.latest_release_notes) rec.release_notes = u.latest_release_notes;
+    checkState.set(name, rec);
   }
 
   const f = inFlight.get(name);
@@ -410,19 +426,15 @@ function onDeviceState(name, body) {
     return;
   }
 
-  // Adopt devices that are already updating (started from the UI) and belong to a group.
-  if (u.state === "updating" && phase === "running") {
-    const g = groups.find((g) => g.queue.includes(name));
-    if (g) {
-      g.queue = g.queue.filter((n) => n !== name);
-      inFlight.set(name, {
-        startedAt: Date.now(), progress: u.progress ?? 0, lastState: "updating",
-        lastSignal: Date.now(), stalled: false,
-        timer: setTimeout(() => onTimeout(name), UPDATE_TIMEOUT_MS),
-      });
-      log("START", name, "(adopted: already updating)");
-      pump();
+  if (u.state === "updating") {
+    externalTransfers.add(name);
+    if (phase === "running") {
+      log("ABORT", `unexpected update in progress for '${name}' — stopping run`);
+      results.set(name, { status: "unconfirmed", error: "update started outside this runner", durationMs: 0 });
+      finishRun(true);
     }
+  } else if (u.state === "idle" || u.state === "available") {
+    externalTransfers.delete(name);
   }
 }
 

@@ -18,8 +18,9 @@ Staggered OTA updates for the home Zigbee2MQTT bridge. Z2M 2.x has **no REST API
 
 - A device is **done** when its MQTT update response arrives, or its state topic flips `updating`→`idle` (ok) / back to `available` (failed). A repeated `idle` state alone does not confirm success; always re-check afterward.
 - A device with no terminal signal for `TIMEOUT_MIN` (45 min) is marked `stalled`; its slot stays **held** until its outcome is confirmed. If a stalled device makes no update progress for 30 minutes after stalling, the run **aborts** (`ABORT` line, exit 3). Repeated unchanged state messages do not reset that timer. Inspect the bridge and re-check; never release a slot merely because a device is silent.
-- A run is limited to devices in a completed, approved `check --json` log. The optional `--group Light` further limits it to lights. It automatically excludes the coordinator, disabled, interviewing, and non-OTA-capable devices; battery/sleepy devices use the lower concurrency.
-- Exit codes: `0` ok · `1` connection error · `3` run finished with failures or aborted · `4` check finished but some checks failed (verification **inconclusive** — those devices' state is unknown). Env knobs (defaults are correct, only change on request): `CONCURRENCY_MAINS` (5), `CONCURRENCY_BATTERY` (2), `TIMEOUT_MIN` (45), `CHECK_TIMEOUT_S` (60); stall windows are in the script header.
+- A run is limited to devices in a completed, approved `check --json` log. The optional `--group Light` further limits it to lights. It excludes the coordinator, disabled, interviewing, and non-OTA-capable devices; battery/sleepy devices use the lower concurrency.
+- The runner aborts before starting updates if an approved device's preflight check fails or an external transfer is observed. It also aborts if an external transfer appears during a run. Device state topics are not retained, so the runner cannot detect every existing transfer: check the Z2M UI for active updates before starting and avoid starting other updates during the run.
+- Exit codes: `0` ok · `1` connection error · `3` run finished with failures or aborted · `4` discovery or run preflight had failed checks (state **inconclusive** — those devices' state is unknown, and no run updates were started). Env knobs (defaults are correct, only change on request): `CONCURRENCY_MAINS` (5), `CONCURRENCY_BATTERY` (2), `TIMEOUT_MIN` (45), `CHECK_TIMEOUT_S` (60); stall windows are in the script header.
 
 ## Workflow
 
@@ -47,7 +48,7 @@ Takes a few minutes (one read-only check per device; asleep battery devices run 
 nohup node ota-runner.mjs run --from-check check.log > run.log 2>&1 &
 ```
 
-The script checks again before updating, but only starts devices in the approved `check.log`. If the user approved one prefix group only, add e.g. `--group Light`; never run unapproved devices. It processes one prefix group (first word of the friendly name) at a time, alphabetical; max 5 in flight per group (2 if it contains any non-mains device). Slots free only when a device's outcome is confirmed (see Runner).
+Before starting, check the Z2M UI for active OTA transfers on any device and wait for them to finish. The script checks again before updating, but only starts devices in the approved `check.log`; if any approved device's check fails, it reports the unconfirmed devices and stops without starting updates. If the user approved one prefix group only, add e.g. `--group Light`; never run unapproved devices. It processes one prefix group (first word of the friendly name) at a time, alphabetical; max 5 in flight per group (2 if it contains any non-mains device). Slots free only when a device's outcome is confirmed (see Runner).
 
 ### 4. Poll and report (you do this)
 
@@ -56,7 +57,7 @@ Poll `run.log` (e.g. `tail -25 run.log`) every 5–10 minutes. Report to the use
 - at start: the plan (groups, sizes, expected duration)
 - after each `GROUP` line: which group finished, its ok/failed/stalled counts, elapsed
 - immediately on any `DONE … failed` or `stalled`
-- immediately on any `ABORT` or `ERROR` (the run has stopped — report the `RESULT` lines it emitted: `stalled` = unconfirmed outcome, `unconfirmed` = was updating, `unstarted` = never ran; tell the user the bridge needs a look; do not restart anything)
+- immediately on any `ABORT` or `ERROR` (the run has stopped — report the `RESULT` lines it emitted: `stalled` = unconfirmed outcome, `unconfirmed` = check failed or update outcome unknown, `unstarted` = never ran; tell the user the bridge needs a look; do not restart anything)
 - every 15 min while a group is still running: the latest `STATUS` line (in-flight devices + progress %), elapsed, rough remaining
 - at `END`: the full `RESULT` table (device, status, from→to version, duration) plus the list of failed/stalled devices
 
