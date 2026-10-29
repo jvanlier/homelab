@@ -6,13 +6,14 @@
  *
  * Usage:
  *   node ota-runner.mjs check [--json]   read-only: which devices have pending updates
- *   node ota-runner.mjs run [--dry-run]  staggered update run
+ *   node ota-runner.mjs run --from-check check.log [--group Light] [--dry-run]
  *
  * Scheduling: one prefix group (first word of friendly name) at a time,
  * alphabetical. Max CONCURRENCY_MAINS in flight (CONCURRENCY_BATTERY if the
  * group contains any non-Mains device). A device is done when: the update
  * response arrives, or its state topic flips updating->idle (ok) or
- * updating->available (failed). Z2M has no cross-device queue; this script
+ * updating->available (failed). Only devices in the approved check are run.
+ * Z2M has no cross-device queue; this script
  * enforces it.
  *
  * Stall handling: a device without a terminal signal after TIMEOUT_MIN is
@@ -45,6 +46,7 @@
  *       (failed checks, e.g. asleep battery devices, cannot confirm state)
  */
 
+import { readFileSync } from "node:fs";
 import mqtt from "mqtt";
 
 const BASE = process.env.MQTT_BASE_TOPIC || "zigbee2mqtt";
@@ -61,9 +63,36 @@ const REPORT_EVERY_MS = Number(process.env.REPORT_EVERY_MS || 60_000);
 const mode = process.argv[2] ?? "check";
 const dryRun = process.argv.includes("--dry-run");
 const asJson = process.argv.includes("--json");
-if (!["check", "run"].includes(mode)) {
-  console.error("usage: ota-runner.mjs check|run [--dry-run] [--json]");
+const args = process.argv.slice(3);
+const options = {};
+for (let i = 0; i < args.length; i++) {
+  const arg = args[i];
+  if (arg === "--json" || arg === "--dry-run") continue;
+  if ((arg === "--from-check" || arg === "--group") && args[i + 1] && !args[i + 1].startsWith("--") && !options[arg]) {
+    options[arg] = args[++i];
+  } else {
+    console.error(`invalid option: ${arg}`);
+    process.exit(2);
+  }
+}
+if (!["check", "run"].includes(mode) || (mode === "run" && !options["--from-check"]) || (mode === "check" && (options["--from-check"] || options["--group"]))) {
+  console.error("usage: ota-runner.mjs check [--json] | run --from-check check.log [--group prefix] [--dry-run]");
   process.exit(2);
+}
+let approved;
+if (mode === "run") {
+  try {
+    const lines = readFileSync(options["--from-check"], "utf8").split(/\r?\n/);
+    const json = lines.filter((line) => line.startsWith("JSON "));
+    if (json.length !== 1 || !lines.some((line) => line.startsWith("END check complete "))) throw new Error("not a completed check --json log");
+    const pending = JSON.parse(json[0].slice(5)).pending;
+    if (!Array.isArray(pending) || pending.some((d) => typeof d?.name !== "string" || !d.name)) throw new Error("invalid pending list");
+    approved = new Set(pending.map((d) => d.name).filter((name) => !options["--group"] || name.split(" ")[0] === options["--group"]));
+    if (options["--group"] && !approved.size) throw new Error(`no pending devices in group ${options["--group"]}`);
+  } catch (e) {
+    console.error(`invalid approved check: ${e.message}`);
+    process.exit(2);
+  }
 }
 
 const log = (tag, ...args) => console.log(tag, args.filter((a) => a !== "" && a !== undefined).join(" "));
@@ -156,7 +185,7 @@ function beginChecks() {
   phase = "checking";
   for (const d of devices) {
     const name = d.friendly_name;
-    if (d.type === "Coordinator" || d.disabled || d.interviewing || !d.definition?.supports_ota) {
+    if (d.type === "Coordinator" || d.disabled || d.interviewing || !d.definition?.supports_ota || (approved && !approved.has(name))) {
       checkState.set(name, { update_available: false, skipped: true });
       continue;
     }
@@ -310,6 +339,7 @@ function onTimeout(name) {
   const f = inFlight.get(name);
   if (!f || f.stalled) return;
   f.stalled = true;
+  f.stalledAt = Date.now();
   f.timer = null;
   const silent = Date.now() - f.lastSignal > ACTIVE_WINDOW_MS;
   results.set(name, {
@@ -370,14 +400,12 @@ function onDeviceState(name, body) {
 
   const f = inFlight.get(name);
   if (f) {
-    touch(name);
     const prev = f.lastState;
     f.lastState = u.state;
-    if (u.state === "updating" && typeof u.progress === "number") f.progress = u.progress;
-    // Backstop for missed responses: updating->idle = ok, updating->available = failed.
-    // (Also fires on idle reached via a missed "updating" publish; the final
-    // re-check is authoritative, so an over-optimistic ok here is recoverable.)
-    if (u.state === "idle" && prev !== "idle") complete(name, "ok", { to: u.installed_version, via: "state" });
+    if (u.state === "updating" && typeof u.progress === "number" && u.progress > f.progress) touch(name);
+    if (u.state === "updating" && typeof u.progress === "number") f.progress = Math.max(f.progress, u.progress);
+    // A repeated idle state does not prove an update ever started.
+    if (u.state === "idle" && prev === "updating") complete(name, "ok", { to: u.installed_version, via: "state" });
     else if (u.state === "available" && prev === "updating") complete(name, "failed", { error: "update aborted (state back to available)", via: "state" });
     return;
   }
@@ -457,15 +485,17 @@ setInterval(() => {
   // the bridge may be wedged — stop the run and require intervention rather
   // than guessing outcomes.
   for (const [name, f] of inFlight) {
-    if (f.stalled && Date.now() - f.lastSignal > STALL_SILENCE_MS) {
-      log("ABORT", `held device '${name}' still unconfirmed and silent for ${fmtDur(STALL_SILENCE_MS)} — stopping run, inspect the bridge`);
+    if (f.stalled && Date.now() - Math.max(f.lastSignal, f.stalledAt) > STALL_SILENCE_MS) {
+      log("ABORT", `held device '${name}' still unconfirmed without update progress for ${fmtDur(STALL_SILENCE_MS)} — stopping run, inspect the bridge`);
       finishRun(true);
       return;
     }
   }
   if (!inFlight.size) return;
   const g = groups[gi];
-  const done = g ? g.names.filter((n) => results.has(n)).length : 0;
+  const confirmed = (n) => results.has(n) && results.get(n).status !== "stalled";
+  const done = g ? g.names.filter(confirmed).length : 0;
+  const totalDone = [...results.keys()].filter(confirmed).length;
   const parts = [...inFlight].map(([n, f]) => `${n}=${f.progress ?? "?"}%${f.stalled ? " (stalled, slot held)" : ""}`).join(" ");
-  log("STATUS", `group=${g?.prefix ?? "?"} done=${done}/${g?.names.length ?? "?"} in_flight=${inFlight.size} total_done=${results.size} elapsed=${elapsed()} | ${parts}`);
+  log("STATUS", `group=${g?.prefix ?? "?"} done=${done}/${g?.names.length ?? "?"} in_flight=${inFlight.size} total_done=${totalDone} elapsed=${elapsed()} | ${parts}`);
 }, REPORT_EVERY_MS);
