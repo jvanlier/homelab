@@ -1,0 +1,22 @@
+name: Zigbee OTA runner
+
+on:
+  push:
+    branches:
+      - '**'
+    paths:
+      - '.agents/skills/z2m-ota/reference/ota-runner.mjs'
+      - '.agents/skills/z2m-ota/reference/ota-runner.test.mjs'
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Test Zigbee OTA runner
+        run: node --test .agents/skills/z2m-ota/reference/ota-runner.test.mjs
