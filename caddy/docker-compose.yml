@@ -1,0 +1,22 @@
+services:
+  caddy:
+    build: .
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      DOMAIN: ${DOMAIN:?Set DOMAIN in caddy/.env}
+      TRANSIP_LOGIN: ${TRANSIP_LOGIN:?Set TRANSIP_LOGIN in caddy/.env}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - type: bind
+        source: ./transip-private-key.pem
+        target: /run/secrets/transip-private-key.pem
+        read_only: true
+        bind:
+          create_host_path: false
+      - caddy-data:/data
+      - caddy-config:/config
+
+volumes:
+  caddy-data:
+  caddy-config:

@@ -8,16 +8,16 @@ The `duux_fan_local` Home Assistant custom integration is baked into the HA imag
 
 1. The fans talk to `collector3.cloudgarden.nl:443` over MQTT-TLS.
 2. A UniFi DNS rewrite points that hostname at the Pi's LAN IP.
-3. EMQX listens on `0.0.0.0:8883`, published on host port `443`.
+3. EMQX listens on `0.0.0.0:8883`, published on the Pi LAN address `192.168.1.138:443`.
 4. The fans connect to EMQX instead of the cloud.
 
 ## Secrets (not in git)
 
-| File | Contents |
-|---|---|
-| `certs/collector3.cloudgarden.nl.key` | TLS private key |
-| `certs/collector3.cloudgarden.nl.crt` | Self-signed TLS cert |
-| `auth-bootstrap.json` | Real credentials (copy from `.example`, fill in) |
+| File                                  | Contents                                         |
+|---------------------------------------|--------------------------------------------------|
+| `certs/collector3.cloudgarden.nl.key` | TLS private key                                  |
+| `certs/collector3.cloudgarden.nl.crt` | Self-signed TLS cert                             |
+| `auth-bootstrap.json`                 | Real credentials (copy from `.example`, fill in) |
 
 ## One-time setup
 
@@ -86,8 +86,8 @@ Also choose a strong password for `ha` — this is what you'll enter in the HA i
 
 Console → Settings → Policy Engine → DNS → Create a new **Host (A)** entry:
 
-| Hostname | IP |
-|---|---|
+| Hostname                    | IP            |
+|-----------------------------|---------------|
 | `collector3.cloudgarden.nl` | `<PI_LAN_IP>` |
 
 ### 5. Deploy EMQX
@@ -125,14 +125,14 @@ docker compose up -d --build
 
 In HA: **Settings → Devices & Services → Add Integration → "Duux Fan Local"**
 
-| Field | Value |
-|---|---|
-| MQTT Host | `collector3.cloudgarden.nl` |
-| MQTT Port | `443` |
-| Username | `ha` |
-| Password | `<ha password from auth-bootstrap.json>` |
-| Model | Whisper Flex 2 |
-| Name | e.g. `Bedroom JC` / `Study` |
+| Field     | Value                                                                      |
+|-----------|----------------------------------------------------------------------------|
+| MQTT Host | `collector3.cloudgarden.nl`                                                |
+| MQTT Port | `443`                                                                      |
+| Username  | `ha`                                                                       |
+| Password  | `<ha password from auth-bootstrap.json>`                                   |
+| Model     | Whisper Flex 2                                                             |
+| Name      | e.g. `Bedroom JC` / `Study`                                                |
 | Device ID | Fan's MAC address, lowercase **colon-separated**, e.g. `aa:bb:cc:dd:ee:ff` |
 
 The Device ID must match the MAC in the fan's MQTT topic (`sensor/<mac>/in`) exactly —
@@ -150,7 +150,7 @@ Repeat for the second fan with its own name and MAC.
 
 ## Port summary
 
-| Port | Binding | Purpose |
-|---|---|---|
-| `443` | `0.0.0.0:443` | MQTT-TLS — fans connect here |
-| `18083` | `127.0.0.1:18083` | EMQX dashboard (loopback-only) |
+| Port    | Binding             | Purpose                        |
+|---------|---------------------|--------------------------------|
+| `443`   | `192.168.1.138:443` | MQTT-TLS — fans connect here   |
+| `18083` | `127.0.0.1:18083`   | EMQX dashboard (loopback-only) |
