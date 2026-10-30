@@ -17,7 +17,7 @@ advanced:
   channel: 25
   pan_id: 35539
   network_key: '!secret.yaml network_key'
-  log_level: debug
+  log_level: info
   last_seen: ISO_8601
 device_options:
   temperature_precision: 1
