@@ -8,7 +8,7 @@ This repository contains services for a Raspberry Pi smart home setup:
 - **pi-hole**: Network-wide ad blocker
 - **zigbee2mqtt-amb**: Zigbee device integration via MQTT
 - **teslamate**: Tesla vehicle tracking
-- **samba**: Containerized file sharing and Time Machine backups on pi501 (see `samba/TIME_MACHINE.md`)
+- **samba**: Containerized file sharing and Time Machine backups on pi501 (see `samba/SETUP.md`)
 - **duux-emqx**: Dedicated EMQX broker for Duux fan local control (LAN-exposed TLS on port 443)
 
 ## Common Commands
