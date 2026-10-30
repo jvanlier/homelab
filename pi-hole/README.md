@@ -21,6 +21,12 @@ To change it, edit the Compose file and recreate the container:
 docker compose up -d
 ```
 
+## Network DNS
+
+The UniFi DHCP server is configured to advertise Pi-hole as the DNS server to
+clients. Clients receive this setting when they obtain or renew their DHCP lease.
+Pi-hole forwards queries that are not blocked locally to the Quad9 upstreams above.
+
 ## Security adlists
 
 `adlists.txt` tracks HaGeZi Multi PRO and Threat Intelligence Feeds Medium.
