@@ -2,13 +2,13 @@
 
 ## Overview
 
-This repository contains Docker-based services for a Raspberry Pi smart home setup:
+This repository contains services for a Raspberry Pi smart home setup:
 - **home-assistant-amb**: Main Home Assistant instance with custom components
 - **frigate**: Video surveillance
 - **pi-hole**: Network-wide ad blocker
 - **zigbee2mqtt-amb**: Zigbee device integration via MQTT
 - **teslamate**: Tesla vehicle tracking
-- **samba**: File sharing
+- **samba**: File sharing and Time Machine backups on pi501 (see `samba/TIME_MACHINE.md`)
 - **duux-emqx**: Dedicated EMQX broker for Duux fan local control (LAN-exposed TLS on port 443)
 
 ## Common Commands

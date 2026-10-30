@@ -1,6 +1,6 @@
 # Time Machine on pi501
 
-These instructions add two Time Machine shares to pi501's existing Samba server. Backups live on the ext4 root filesystem (`/dev/sda2`), with a separate Linux and Samba account for each Mac.
+These instructions add two Time Machine shares to pi501's existing Samba server. Backups live on the ext4 root filesystem, with a separate Linux and Samba account for each Mac.
 
 | Mac     | Share                 | Samba-reported limit | Hard user quota |
 |---------|-----------------------|---------------------:|----------------:|
@@ -27,7 +27,7 @@ Confirm that `/` is the expected ext4 filesystem and has enough free space. Thes
 
 ```bash
 sudo quotaon -u -p /
-sudo tune2fs -l /dev/sda2 | grep 'Filesystem features'
+sudo tune2fs -l "$(findmnt -no SOURCE /)" | grep 'Filesystem features'
 findmnt --fstab -no OPTIONS /
 sudo find / -maxdepth 1 \( -name aquota.user -o -name quota.user \) -ls
 ```
@@ -182,6 +182,7 @@ Enter the following in the editor:
 
 ```ini
 [Unit]
+# Bookworm uses quotaon.service; Trixie orders quotaon-root.service before local-fs.target.
 After=quotaon.service
 
 [Service]
@@ -191,8 +192,8 @@ ExecStartPre=/bin/sh -c "LC_ALL=C /usr/sbin/quotaon -u -p / 2>&1 | grep -Fq ' is
 This also blocks the existing media share if quotas are off. Save the override, then restart Samba and check the shares:
 
 ```bash
-sudo systemctl restart smbd
 sudo systemctl enable --now avahi-daemon
+sudo systemctl restart smbd
 smbclient //localhost/TimeMachine-Jori -U tm-jori -c 'ls'
 smbclient //localhost/TimeMachine-Chantal -U tm-chantal -c 'ls'
 ```
