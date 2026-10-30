@@ -84,7 +84,7 @@ prepare() {
         echo "Quotas are already prepared. Reboot, then run: sudo ./setup.sh install"
         return
     fi
-    [ ! -e "$STATE" ] && [ ! -L "$STATE" ] || fail "An earlier preparation was interrupted; see the recovery section in SETUP.md"
+    [ ! -e "$STATE" ] && [ ! -L "$STATE" ] || fail "An earlier preparation was interrupted; see the recovery instructions in docs/operations.md"
     [ ! -e "$BACKUP" ] && [ ! -L "$BACKUP" ] || fail "$BACKUP already exists; inspect it before proceeding"
     [ ! -L /etc/fstab ] || fail "/etc/fstab is a symlink; inspect it before proceeding"
     for user in tm-jori tm-chantal; do
