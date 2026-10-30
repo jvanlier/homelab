@@ -9,7 +9,7 @@ services:
       - "445:445"
     volumes:
       - type: bind
-        source: /media
+        source: /srv/media
         target: /shares/media
         read_only: true
         bind:

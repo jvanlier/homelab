@@ -1,6 +1,6 @@
 # Samba and Time Machine on pi501
 
-This setup moves pi501's existing Samba service into Docker. It keeps the `pi-share` media share at `/media`, read-only and accessible to `media`, and adds separate Time Machine shares:
+This setup moves pi501's existing Samba service into Docker. It moves the existing `pi-share` media files from `/media` to `/srv/media`, keeps the share read-only and accessible to `media`, and adds separate Time Machine shares:
 
 | Mac     | Share                 | Samba-reported limit | Hard user quota |
 |---------|-----------------------|---------------------:|----------------:|
@@ -36,7 +36,7 @@ sudo testparm -s
 sudo -u media test -r /media && sudo -u media test -x /media
 ```
 
-Confirm that the current `pi-share` uses `/media`, is read-only and allows `media`, as described in the original setup. If the live setup differs, adjust `smb.conf` and `docker-compose.yml` to match before switching. The existing host Samba configuration, passwords and media files are not modified by the container setup.
+Confirm that the current `pi-share` uses `/media`, is read-only and allows `media`, as described in the original setup. If the live setup differs, adjust `smb.conf` and `docker-compose.yml` to match before switching. The host Samba configuration and passwords remain in place; the media directory is moved during cutover.
 
 These steps assume user quotas are not already configured on `/`. Check for an existing configuration:
 
@@ -150,10 +150,44 @@ The Avahi file advertises the SMB service and both Time Machine shares. If `/etc
 
 The systemd unit runs the quota check before every container start. It requires the backup directories to be on `/`, owned by distinct backup users, and subject to enabled hard quotas no larger than those above. Docker's restart policy is deliberately disabled so a Docker daemon restart cannot bypass this check. Use `systemctl` to start, stop or restart the service; do not start it with `docker compose up` directly. If quotas are off, the media share is also unavailable until the check passes.
 
-Stop and disable the host Samba service before starting the container on port 445:
+Stop and disable the host Samba service before moving the media directory and starting the container on port 445:
 
 ```bash
 sudo systemctl disable --now smbd
+```
+
+Move the directory, preserving its ownership, permissions, and all files, including hidden files. This requires `/media` to be an ordinary directory without mounted filesystems inside it, `/srv/media` not to exist, and `/media` and `/srv` to be on the same mount. The checks below stop without moving anything if those conditions are not met:
+
+```bash
+sudo sh -eu -c '
+    if [ ! -d /media ] || [ -L /media ] || [ -e /srv/media ] || [ -L /srv/media ]; then
+        echo "Expected /media directory and no existing /srv/media" >&2
+        exit 1
+    fi
+    mounts=$(findmnt -rn -o TARGET)
+    if printf "%s\n" "$mounts" | grep -Eq "^/media(/|$)"; then
+        echo "Unmount filesystems under /media before proceeding" >&2
+        exit 1
+    fi
+    media_mount=$(findmnt -n -o ID -T /media)
+    srv_mount=$(findmnt -n -o ID -T /srv)
+    if [ -z "$media_mount" ] || [ "$media_mount" != "$srv_mount" ]; then
+        echo "/media and /srv must be on the same mount" >&2
+        exit 1
+    fi
+    mv -T -n /media /srv/media
+    if [ -e /media ]; then
+        echo "Media directory was not moved" >&2
+        exit 1
+    fi
+    mkdir -m 0755 /media
+'
+sudo -u media test -r /srv/media && sudo -u media test -x /srv/media
+```
+
+The new empty `/media` remains available for removable drives. If a command fails, resolve it before starting the container. Then start the service:
+
+```bash
 sudo systemctl enable --now samba-container
 sudo systemctl status samba-container
 ```
@@ -220,12 +254,19 @@ sudo systemctl restart samba-container
 
 Do not remove the Docker `samba-state` volume: it contains the Samba account database. If the checkout moves, update `/etc/default/samba-container` with the new absolute directory before restarting. If limits change, update both `smb.conf` and `quota-check.sh`, install the updated quota check, and apply the new host quotas.
 
-To return to the original host Samba service, stop the container, remove its Avahi advertisement, then start the original service:
+To return to the host Samba service, stop the container and remove its Avahi advertisement:
 
 ```bash
 sudo systemctl disable --now samba-container
 sudo rm /etc/avahi/services/samba-timemachine.service
+sudo nano /etc/samba/smb.conf
+```
+
+If the media directory was moved, change the `path` of the host's `[pi-share]` to `/srv/media`. If the move did not complete, keep the path pointing to `/media`. Then validate and start the host service:
+
+```bash
+sudo testparm
 sudo systemctl enable --now smbd
 ```
 
-The host's original Samba configuration and media account database remain in place. Neither rollback nor a container update removes the media or backup files.
+The host's original media account database remains in place. Neither rollback nor a container update removes the media or backup files.
