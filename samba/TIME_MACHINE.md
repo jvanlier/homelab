@@ -1,29 +1,44 @@
-# Time Machine on pi501
+# Samba and Time Machine on pi501
 
-These instructions add two Time Machine shares to pi501's existing Samba server. Backups live on the ext4 root filesystem, with a separate Linux and Samba account for each Mac.
+This setup moves pi501's existing Samba service into Docker. It keeps the `pi-share` media share at `/media`, read-only and accessible to `media`, and adds separate Time Machine shares:
 
 | Mac     | Share                 | Samba-reported limit | Hard user quota |
 |---------|-----------------------|---------------------:|----------------:|
 | Jori    | `TimeMachine-Jori`    |              480 GiB |         500 GiB |
 | Chantal | `TimeMachine-Chantal` |              240 GiB |         250 GiB |
 
-The Samba limit tells Time Machine when to start reclaiming space; the filesystem quota enforces the hard limit. Samba's calculation is approximate, so its limit is set slightly lower. These quotas apply to **all files owned by each backup account on the root filesystem**, not just files in the share. Keep the accounts dedicated to backups.
+The backup directories live on pi501's ext4 root filesystem. Samba's reported limit is approximate; host filesystem quotas enforce the hard limits. Each quota applies to **all files owned by that account on the root filesystem**, so keep the backup accounts dedicated to Time Machine.
 
-The Pi had about 812 GiB free when this was planned. If both quotas fill, that leaves roughly 62 GiB for the system and other files. The initial backups may be smaller than the space used on the Macs, but these limits leave little room for backup history. Check free space and quota usage regularly.
+The Pi had about 812 GiB free when this was planned. If both quotas fill, roughly 62 GiB remains for the system and other files. These limits leave little room for backup history, so monitor free space and consider a larger disk if needed.
 
 ## 1. Prepare pi501
 
-Run these commands on pi501:
+These instructions assume a Debian-based Pi with rootful Docker and Docker Compose installed. Run commands on pi501, from this repository's `samba` directory:
 
 ```bash
+cd /path/to/homelab/samba
 findmnt -no SOURCE,FSTYPE,OPTIONS /
 df -h /
-smbd --version
+sudo docker compose version
+sudo docker info --format '{{json .SecurityOptions}}'
 sudo apt-get update
-sudo apt-get install samba samba-vfs-modules smbclient avahi-daemon quota
+sudo apt-get install avahi-daemon quota smbclient
 ```
 
-Confirm that `/` is the expected ext4 filesystem and has enough free space. These instructions assume that user quotas are not already configured on it. Check for existing quotas and ext4's built-in quota feature:
+Confirm `/` is the expected ext4 filesystem, has enough free space, and Docker's security options do not include `rootless`. The container uses the host's numeric user IDs; rootless Docker remaps them and would prevent the intended quota accounting.
+
+Check the existing media account and share before migrating:
+
+```bash
+getent passwd media
+getent passwd nobody
+sudo testparm -s
+sudo -u media test -r /media && sudo -u media test -x /media
+```
+
+Confirm that the current `pi-share` uses `/media`, is read-only and allows `media`, as described in the original setup. If the live setup differs, adjust `smb.conf` and `docker-compose.yml` to match before switching. The existing host Samba configuration, passwords and media files are not modified by the container setup.
+
+These steps assume user quotas are not already configured on `/`. Check for an existing configuration:
 
 ```bash
 sudo quotaon -u -p /
@@ -32,11 +47,9 @@ findmnt --fstab -no OPTIONS /
 sudo find / -maxdepth 1 \( -name aquota.user -o -name quota.user \) -ls
 ```
 
-If user quotas are already on, the filesystem features include `quota`, the root fstab options already configure quotas, or either quota file exists, stop here and inspect the existing setup before proceeding. The steps below create a new external quota file and must not replace an existing quota configuration.
+If user quotas are already on, the filesystem features include `quota`, the root fstab options already configure quotas, or either quota file exists, stop and inspect the existing setup. Do not replace an existing quota configuration with these instructions.
 
-Use a Samba version with the Time Machine rename fix. For Samba 4.22, use 4.22.6 or newer; for 4.23, use 4.23.3 or newer. Samba 4.8–4.21 also needs an extra setting in step 3. See the [Samba Time Machine guidance](https://wiki.samba.org/index.php/Configure_Samba_to_Work_Better_with_Mac_OS_X) for version details.
-
-## 2. Enable and verify user quotas
+## 2. Enable and verify host quotas
 
 Back up `/etc/fstab`, then edit it:
 
@@ -51,7 +64,7 @@ On the **existing line whose mount point is `/`**, append `usrjquota=aquota.user
 defaults,noatime,usrjquota=aquota.user,jqfmt=vfsv0
 ```
 
-Do not add a second root filesystem line. Validate the file and remount `/`:
+Do not add a second root filesystem line. Validate and remount:
 
 ```bash
 sudo findmnt --verify --verbose
@@ -59,7 +72,7 @@ sudo mount -o remount /
 findmnt -no OPTIONS /
 ```
 
-Resolve any errors before proceeding. Confirm that the quota options appear in the mount options. Stop Samba and other services that write to the root filesystem while initializing the quota file. The `-m` option checks the live root filesystem without remounting it read-only; other writes during the scan can make the recorded usage inaccurate. The backup accounts below must not exist or own files yet.
+Resolve any errors and confirm the quota options appear. Stop Samba and other services that write to the root filesystem while initializing the quota file. The `-m` option checks the live root filesystem without remounting it read-only; writes during the scan can make recorded usage inaccurate. The backup accounts below must not exist or own files yet.
 
 ```bash
 sudo systemctl stop smbd
@@ -70,28 +83,21 @@ sudo quotaon -u -p /
 
 User quota for `/` must be **on**. `quotaon -p` may return a nonzero exit status even when it prints that quotas are on; check its output. If another command fails, do not continue or force the quota check; investigate the error first.
 
-Create the dedicated accounts and directories:
+Create the backup accounts and directories on the host:
 
 ```bash
 sudo adduser --system --group --no-create-home --shell /usr/sbin/nologin tm-jori
 sudo adduser --system --group --no-create-home --shell /usr/sbin/nologin tm-chantal
 sudo install -d -o tm-jori -g tm-jori -m 0700 /srv/timemachine/jori
 sudo install -d -o tm-chantal -g tm-chantal -m 0700 /srv/timemachine/chantal
-sudo smbpasswd -a tm-jori
-sudo smbpasswd -a tm-chantal
-```
-
-Choose a separate Samba password for each account. Set the hard quotas and check them:
-
-```bash
 sudo setquota -u tm-jori 0 500G 0 0 /
 sudo setquota -u tm-chantal 0 250G 0 0 /
 sudo repquota -u /
 ```
 
-`setquota` uses binary units: `500G` is 500 GiB. Zero soft and inode limits mean those limits are disabled. The hard block limits are the numbers in the `hard` column.
+`setquota` uses binary units: `500G` is 500 GiB. Zero soft and inode limits mean those limits are disabled. Check the hard block limits in the `hard` column.
 
-Reboot, then verify that user quotas are still on and both hard limits remain in place:
+Reboot, then verify quotas are still enabled and both limits remain in place:
 
 ```bash
 sudo reboot
@@ -102,9 +108,9 @@ sudo quotaon -u -p /
 sudo repquota -u /
 ```
 
-Do not start backups if quota enforcement is off or either limit is missing. An existing Samba service may have restarted on boot; the new shares are not configured yet.
+An existing host Samba service may restart on boot; the new shares are not configured yet. Do not start backups if quota enforcement is off or a limit is missing.
 
-To verify that the hard limit actually blocks writes, temporarily give each new account a 1 MiB quota and try to write 2 MiB. Do this **before starting either backup**:
+Before starting either backup, verify that the hard limit blocks writes. Temporarily set each quota to 1 MiB and try to write 2 MiB:
 
 ```bash
 sudo setquota -u tm-jori 0 1M 0 0 /
@@ -113,7 +119,7 @@ sudo runuser -u tm-jori -- dd if=/dev/zero of=/srv/timemachine/jori/quota-test b
 sudo runuser -u tm-chantal -- dd if=/dev/zero of=/srv/timemachine/chantal/quota-test bs=1M count=2 status=none
 ```
 
-Both writes should fail with `Disk quota exceeded`. Remove the test files and restore the intended limits:
+Both writes should fail with `Disk quota exceeded`. Remove the test files and restore the limits:
 
 ```bash
 sudo rm -f /srv/timemachine/jori/quota-test /srv/timemachine/chantal/quota-test
@@ -124,88 +130,70 @@ sudo repquota -u /
 
 If either write succeeded or failed for another reason, resolve the problem before enabling the shares.
 
-## 3. Configure Samba
+## 3. Install the container service
 
-Back up the current configuration and edit it:
-
-```bash
-sudo cp /etc/samba/smb.conf /etc/samba/smb.conf.before-timemachine
-sudo nano /etc/samba/smb.conf
-```
-
-Add these lines to the existing `[global]` section:
-
-```ini
-vfs objects = fruit streams_xattr
-fruit:metadata = stream
-```
-
-If there is already a `vfs objects` setting, incorporate the modules into the existing configuration instead of adding a duplicate line. A per-share `vfs objects` setting overrides the global one. Enabling `fruit` globally also ensures the Apple SMB extensions are available when a Mac connects to the existing media share first.
-
-For Samba 4.8–4.21, also add `fruit:posix_rename = yes` to `[global]`. Do not add that setting for newer releases.
-
-Append the shares, leaving the existing `pi-share` intact:
-
-```ini
-[TimeMachine-Jori]
-path = /srv/timemachine/jori
-browseable = yes
-read only = no
-guest ok = no
-valid users = tm-jori
-fruit:time machine = yes
-fruit:time machine max size = 480G
-
-[TimeMachine-Chantal]
-path = /srv/timemachine/chantal
-browseable = yes
-read only = no
-guest ok = no
-valid users = tm-chantal
-fruit:time machine = yes
-fruit:time machine max size = 240G
-```
-
-Validate the complete configuration:
+From `samba/`, build the image and install the host discovery and startup files:
 
 ```bash
-sudo testparm
-```
-
-To prevent Samba from starting without user quotas, add a systemd override:
-
-```bash
-sudo systemctl edit smbd
-```
-
-Enter the following in the editor:
-
-```ini
-[Unit]
-# Bookworm uses quotaon.service; Trixie orders quotaon-root.service before local-fs.target.
-After=quotaon.service
-
-[Service]
-ExecStartPre=/bin/sh -c "LC_ALL=C /usr/sbin/quotaon -u -p / 2>&1 | grep -Fq ' is on'"
-```
-
-This also blocks the existing media share if quotas are off. Save the override, then restart Samba and check the shares:
-
-```bash
+sudo docker compose config --quiet
+sudo docker compose build
+sudo install -m 0644 avahi.service /etc/avahi/services/samba-timemachine.service
+sudo install -m 0755 quota-check.sh /usr/local/sbin/samba-quota-check
+sudo install -m 0644 samba-container.service /etc/systemd/system/samba-container.service
+printf 'SAMBA_DIR="%s"\n' "$(pwd -P)" | sudo tee /etc/default/samba-container >/dev/null
+sudo systemctl daemon-reload
 sudo systemctl enable --now avahi-daemon
-sudo systemctl restart smbd
+sudo /usr/local/sbin/samba-quota-check
+```
+
+The Avahi file advertises the SMB service and both Time Machine shares. If `/etc/avahi/services/` already has a static Samba advertisement, remove or update that duplicate before starting the container.
+
+The systemd unit runs the quota check before every container start. It requires the backup directories to be on `/`, owned by distinct backup users, and subject to enabled hard quotas no larger than those above. Docker's restart policy is deliberately disabled so a Docker daemon restart cannot bypass this check. Use `systemctl` to start, stop or restart the service; do not start it with `docker compose up` directly. If quotas are off, the media share is also unavailable until the check passes.
+
+Stop and disable the host Samba service before starting the container on port 445:
+
+```bash
+sudo systemctl disable --now smbd
+sudo systemctl enable --now samba-container
+sudo systemctl status samba-container
+```
+
+The container reads `/etc/passwd` and `/etc/group` from the host, preserving user IDs for media permissions and quota accounting. Recreating the container on service restart picks up changes to those files. Docker stores Samba's account database in the persistent `samba-state` volume; it is separate from the host Samba database and must be retained across updates.
+
+Set the container's Samba passwords. For `media`, use its current password if existing clients should keep working with their saved credentials:
+
+```bash
+sudo docker compose exec samba smbpasswd -a media
+sudo docker compose exec samba smbpasswd -a tm-jori
+sudo docker compose exec samba smbpasswd -a tm-chantal
+```
+
+Choose a separate password for each backup account. Passwords are not stored in this repository. Until the `media` password is set in the container, the existing share is unavailable to clients.
+
+Check that all three shares work:
+
+```bash
+smbclient //localhost/pi-share -U media -c 'ls'
 smbclient //localhost/TimeMachine-Jori -U tm-jori -c 'ls'
 smbclient //localhost/TimeMachine-Chantal -U tm-chantal -c 'ls'
 ```
 
-Each `smbclient` command should list its share after prompting for that account's Samba password. Verify that each account is denied access to the other share:
+Each command should list its share after prompting for that account's Samba password. `pi-share` must remain read-only. Confirm the backup accounts cannot access each other's shares:
 
 ```bash
 smbclient //localhost/TimeMachine-Chantal -U tm-jori -c 'ls'
 smbclient //localhost/TimeMachine-Jori -U tm-chantal -c 'ls'
 ```
 
-Both commands should report `NT_STATUS_ACCESS_DENIED`. If Samba fails to start, check `sudo journalctl -u smbd`, the quota status and the installed Samba version.
+Both should report `NT_STATUS_ACCESS_DENIED`. If the service fails, inspect `sudo journalctl -u samba-container` and run `sudo /usr/local/sbin/samba-quota-check`.
+
+After a reboot, verify the service, quota check and media share again:
+
+```bash
+sudo /usr/local/sbin/samba-quota-check
+systemctl status samba-container
+smbclient //localhost/pi-share -U media -c 'ls'
+```
 
 ## 4. Set up the Macs
 
@@ -219,4 +207,25 @@ sudo quota -v -u tm-jori
 sudo quota -v -u tm-chantal
 ```
 
-If backups run out of room or the remaining Pi space becomes too small, move them to a larger dedicated disk. Keep another backup of irreplaceable data on a separate device or off-site.
+Keep another backup of irreplaceable data on a separate device or off-site.
+
+## Updates and rollback
+
+After changing `smb.conf` or the Dockerfile, rebuild the image and restart the service from `samba/`:
+
+```bash
+sudo docker compose build
+sudo systemctl restart samba-container
+```
+
+Do not remove the Docker `samba-state` volume: it contains the Samba account database. If the checkout moves, update `/etc/default/samba-container` with the new absolute directory before restarting. If limits change, update both `smb.conf` and `quota-check.sh`, install the updated quota check, and apply the new host quotas.
+
+To return to the original host Samba service, stop the container, remove its Avahi advertisement, then start the original service:
+
+```bash
+sudo systemctl disable --now samba-container
+sudo rm /etc/avahi/services/samba-timemachine.service
+sudo systemctl enable --now smbd
+```
+
+The host's original Samba configuration and media account database remain in place. Neither rollback nor a container update removes the media or backup files.
