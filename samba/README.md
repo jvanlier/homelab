@@ -3,6 +3,8 @@ Samba fileshare
 
 Sharing some media using Samba - not in docker.
 
+For Mac backups on pi501, see [Time Machine setup](TIME_MACHINE.md).
+
 Update: actually, not quite sure if unix user `media` needs to be added since we also add the SMB user.
 
 ```bash
