@@ -1,0 +1,7 @@
+check:
+    shellcheck setup.sh quota-check.sh tests/setup-integration.sh
+    docker compose config --quiet
+
+test:
+    ./tests/setup-integration.sh debian:bookworm-slim
+    ./tests/setup-integration.sh debian:trixie-slim
