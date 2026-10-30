@@ -17,6 +17,8 @@ services:
       - WEBPASSWORD=${WEBPASSWORD}
       # Since pihole v6 it only accepts connections within Docker by default:
       - FTLCONF_dns_listeningMode=ALL
+      # Quad9 upstreams block known malicious domains.
+      - FTLCONF_dns_upstreams=9.9.9.9;149.112.112.112
     # Volumes store your data between container upgrades
     volumes:
       - './etc-pihole:/etc/pihole'

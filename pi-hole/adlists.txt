@@ -1,0 +1,4 @@
+# HaGeZi Multi PRO: ads, trackers, and malicious domains
+https://raw.githubusercontent.com/hagezi/dns-blocklists/main/adblock/pro.txt
+# HaGeZi TIF Medium: dedicated threat intelligence feeds
+https://raw.githubusercontent.com/hagezi/dns-blocklists/main/adblock/tif.medium.txt
