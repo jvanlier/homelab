@@ -1,0 +1,34 @@
+name: samba
+
+services:
+  samba:
+    build: .
+    image: homelab-samba:local
+    # The host systemd unit checks quotas before every start.
+    restart: "no"
+    userns_mode: host
+    ports:
+      - "445:445"
+    volumes:
+      - type: bind
+        source: /srv/media
+        target: /shares/media
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: /srv/timemachine/jori
+        target: /shares/jori
+        bind:
+          create_host_path: false
+      - type: bind
+        source: /srv/timemachine/chantal
+        target: /shares/chantal
+        bind:
+          create_host_path: false
+      - /etc/passwd:/etc/passwd:ro
+      - /etc/group:/etc/group:ro
+      - samba-state:/var/lib/samba
+
+volumes:
+  samba-state:
