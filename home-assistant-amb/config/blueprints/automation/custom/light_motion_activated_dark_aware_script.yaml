@@ -62,13 +62,20 @@ variables:
   total_no_motion_wait: !input total_no_motion_wait
   device_no_motion_wait: !input device_no_motion_wait
   light_entity_id: !input light_entity_id
+  adaptive_light_entity_id: !input adaptive_light_entity
 
 action:
-  - alias: "Apply adaptive lighting"
-    service: adaptive_lighting.apply
-    data:
-      entity_id: !input adaptive_light_entity
-      turn_on_lights: true
+  - alias: "Apply adaptive lighting if light is off or not manually controlled"
+    if:
+      - condition: template
+        value_template: >
+          {{ is_state(light_entity_id, 'off') or
+             light_entity_id not in state_attr(adaptive_light_entity_id, 'manual_control') | default([]) }}
+    then:
+      - service: adaptive_lighting.apply
+        data:
+          entity_id: !input adaptive_light_entity
+          turn_on_lights: true
   - alias: "Wait until there is no motion from device"
     wait_for_trigger:
       platform: state
@@ -94,6 +101,11 @@ action:
           # Assumption: the script already disables adapt brightness
           - alias: "Dim the light"
             action: !input dim_script
+          - alias: "Clear manual control so next motion re-applies adaptive lighting"
+            service: adaptive_lighting.set_manual_control
+            data:
+              entity_id: !input adaptive_light_entity
+              manual_control: false
     default:
       - alias: "Turn off the light"
         service: light.turn_off
