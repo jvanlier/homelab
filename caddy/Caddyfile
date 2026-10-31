@@ -7,6 +7,10 @@ hass.{$DOMAIN} {
 	reverse_proxy 127.0.0.1:8123
 }
 
+pi-hole.{$DOMAIN} {
+	reverse_proxy 192.168.1.138:8001
+}
+
 tm.{$DOMAIN} {
 	reverse_proxy 127.0.0.1:4000
 }
