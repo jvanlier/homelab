@@ -5,7 +5,8 @@ blueprint:
     Left button only. For rooms with separate ambiance and color light groups.
 
     Short press (release): toggle lights on/off (AL applies automatically via sub-groups).
-    Hold: dim light brightness (disables AL adapt_brightness while dimming).
+    Hold: dim light brightness (initial direction based on current brightness,
+    alternates on repeated holds, disables AL adapt_brightness while dimming).
 
     When input_boolean_color_blocked is "on", only ambiance lights are controlled.
     This prevents the switch from interfering with wake-up light colors.
@@ -35,7 +36,7 @@ blueprint:
           unit_of_measurement: "%"
     direction_timeout:
       name: Direction timeout
-      description: Seconds after the last dim before direction resets to "down".
+      description: Seconds after the last dim before direction resets based on brightness.
       default: 5
       selector:
         number:
@@ -43,6 +44,18 @@ blueprint:
           max: 30
           step: 1
           unit_of_measurement: seconds
+    brightness_threshold:
+      name: Brightness threshold for initial dim direction
+      description: >
+        When dimming starts after timeout, dim down if brightness is above this
+        percentage, dim up if at or below.
+      default: 50
+      selector:
+        number:
+          min: 10
+          max: 90
+          step: 5
+          unit_of_measurement: "%"
 
     dim_direction_entity:
       name: Dim direction input_text helper
@@ -146,6 +159,7 @@ action:
       dim_direction_entity: !input dim_direction_entity
       brightness_step_pct: !input brightness_step_pct
       direction_timeout: !input direction_timeout
+      brightness_threshold: !input brightness_threshold
       # Workaround: Some Hue wall switches occasionally emit left_press_release instead
       # of left_hold_release at the end of a hold sequence (firmware timing bug that
       # occurs when the button is released very quickly after the last hold tick).
@@ -198,7 +212,8 @@ action:
               prev_ts: "{{ parts[1] | int(0) if parts | length >= 2 else 0 }}"
               now_ts: "{{ now().timestamp() | int }}"
               timed_out: "{{ (now_ts - prev_ts) > direction_timeout }}"
-              current_dir: "{{ 'down' if timed_out else prev_dir }}"
+              current_brightness_pct: "{{ (state_attr(active_lights, 'brightness') | float(0) / 255 * 100) | round(0) | int }}"
+              current_dir: "{{ ('down' if current_brightness_pct > brightness_threshold else 'up') if timed_out else prev_dir }}"
               step_value: "{{ brightness_step_pct | int if current_dir == 'up' else (brightness_step_pct | int * -1) }}"
           # Dim via the Zigbee group for consistent brightness across all lights.
           - action: light.turn_on
@@ -216,7 +231,7 @@ action:
               value: "{{ current_dir ~ '_' ~ now_ts }}"
 
       # --- DIM DIRECTION FLIP (hold release) ---
-      # Alternates between up/down on each hold cycle. Resets to "down" after timeout.
+      # Alternates between up/down on each hold cycle. Initial direction based on brightness after timeout.
       - conditions: "{{ command == 'left_hold_release' }}"
         sequence:
           - variables:
@@ -226,7 +241,8 @@ action:
               prev_ts: "{{ parts[1] | int(0) if parts | length >= 2 else 0 }}"
               now_ts: "{{ now().timestamp() | int }}"
               timed_out: "{{ (now_ts - prev_ts) > direction_timeout }}"
-              current_dir: "{{ 'down' if timed_out else prev_dir }}"
+              current_brightness_pct: "{{ (state_attr(active_lights, 'brightness') | float(0) / 255 * 100) | round(0) | int }}"
+              current_dir: "{{ ('down' if current_brightness_pct > brightness_threshold else 'up') if timed_out else prev_dir }}"
               next_dir: "{{ 'up' if current_dir == 'down' else 'down' }}"
           - action: input_text.set_value
             target:
