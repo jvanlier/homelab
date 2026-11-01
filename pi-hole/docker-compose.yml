@@ -17,6 +17,7 @@ services:
       - FTLCONF_dns_listeningMode=ALL
       # Quad9 upstreams block known malicious domains.
       - FTLCONF_dns_upstreams=9.9.9.9;149.112.112.112
+      - FTLCONF_dns_hosts=192.168.1.1 unifi
     # Volumes store your data between container upgrades
     volumes:
       - './etc-pihole:/etc/pihole'
