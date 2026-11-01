@@ -1,39 +1,8 @@
-Samba fileshare
-=============
+# Samba on pi501
 
-Sharing some media using Samba - not in docker.
+Samba runs in Docker and serves the read-only `pi-share` media share from `/srv/media`, alongside two Time Machine shares. The image and share configuration are in this directory.
 
-Update: actually, not quite sure if unix user `media` needs to be added since we also add the SMB user.
-
-```bash
-sudo adduser media
-mkdir -p /media
-sudo chown media:media /media
-
-sudo apt-get install samba samba-common-bin
-```
-
-Add the following to `/etc/samba/smb.conf` and remove the default share definitions:
-
-```
-[pi-share]
-path = /media
-browseable = yes
-read only = yes
-guest ok = no
-valid users = media
-```
-
-Run `testparm` to ensure no syntax errors.
-
-Add the SMB user (use the same password):
-
-```
-sudo smbpasswd -a media
-```
-
-Restart:
-
-```
-sudo systemctl restart smbd
-```
+- [Set up Samba and Time Machine](docs/setup.md)
+- [Operate and recover Samba](docs/operations.md)
+- [Shares, paths and requirements](docs/reference.md)
+- [How storage and quotas work](docs/architecture.md)

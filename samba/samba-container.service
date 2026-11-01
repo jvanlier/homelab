@@ -1,0 +1,19 @@
+[Unit]
+Description=Samba container with Time Machine quotas
+Requires=docker.service
+Wants=avahi-daemon.service
+# Bookworm uses quotaon.service; Trixie orders quotaon-root.service before local-fs.target.
+After=docker.service avahi-daemon.service quotaon.service local-fs.target
+PartOf=docker.service
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/default/samba-container
+ExecStartPre=/usr/local/sbin/samba-quota-check
+ExecStart=/usr/bin/docker compose --project-directory ${SAMBA_DIR} -f ${SAMBA_DIR}/docker-compose.yml up --no-build --no-color --abort-on-container-exit --force-recreate
+ExecStop=/usr/bin/docker compose --project-directory ${SAMBA_DIR} -f ${SAMBA_DIR}/docker-compose.yml stop
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
