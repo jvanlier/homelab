@@ -22,3 +22,7 @@ tm-grafana.{$DOMAIN} {
 z2m.{$DOMAIN} {
 	reverse_proxy 127.0.0.1:8002
 }
+
+frosthaven-deck-builder.{$DOMAIN} {
+	reverse_proxy 127.0.0.1:8080
+}
