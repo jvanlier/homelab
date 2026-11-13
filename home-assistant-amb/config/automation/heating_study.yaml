@@ -26,10 +26,6 @@
         bedroom_jc_new_target_temp: "{{ state_attr('climate.bedroom_jc', 'current_temperature') | float(20) + 1.0 }}"
     - choose:
       - conditions:
-          - alias: "Living thermostat not heating much"
-            condition: numeric_state
-            entity_id: sensor.living_heating
-            below: 10  # percent
           - alias: "Study needs heating"
             condition: template
             value_template: "{{ state_attr('climate.study', 'current_temperature') < study_target_temp }}"
