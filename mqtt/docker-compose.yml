@@ -5,13 +5,18 @@ services:
     restart: unless-stopped
     volumes:
       - ./mosquitto-data:/mosquitto
-      - ./mosquitto-no-auth.conf:/mosquitto-no-auth.conf
+      - ./mosquitto.conf:/mosquitto.conf:ro
+      - ./acl.conf:/mosquitto-acl.conf:ro
+      # Generated on the Pi, not in git: TLS cert/key and LAN passwords.
+      - ./lan:/mosquitto/lan
     ports:
-      # Loopback-only: HA/frigate reach it via host localhost; z2m/teslamate
-      # use the shared `mqtt` Docker net, NOT the published port. Closes all
-      # LAN/IoT/internet exposure.
+      # Internal, loopback-only and anonymous: HA/frigate reach it via host
+      # localhost; z2m/teslamate use the shared `mqtt` Docker net, NOT the
+      # published port.
       - "127.0.0.1:1883:1883"
-    command: "mosquitto -c /mosquitto-no-auth.conf -p 1883"
+      # TLS + login for LAN/IoT devices only (see README "LAN listener").
+      - "192.168.1.138:8883:8883"
+    command: "mosquitto -c /mosquitto.conf"
     networks:
       - mqtt
 

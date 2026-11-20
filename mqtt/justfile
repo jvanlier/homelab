@@ -1,0 +1,19 @@
+# Run on pi502 in this directory. See README "LAN listener".
+
+# One-time: self-signed TLS cert for the LAN listener (valid 10 years).
+tls-cert:
+  mkdir -p lan
+  test ! -e lan/server.key || { echo "lan/server.key already exists; refusing to overwrite"; exit 1; }
+  openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 3650 \
+    -subj "/CN=192.168.1.138" -addext "subjectAltName=IP:192.168.1.138" \
+    -keyout lan/server.key -out lan/server.crt
+
+# SHA-256 fingerprint to compare against the one AWTRIX shows before pressing Trust.
+fingerprint:
+  openssl x509 -in lan/server.crt -noout -fingerprint -sha256
+
+# Add a LAN user, or change its password (prompts). Username = the device's MQTT prefix.
+add-user name:
+  mkdir -p lan
+  docker compose run --rm --no-deps mqtt sh -c 'f=/mosquitto/lan/passwd; [ -s $f ] || c=-c; mosquitto_passwd $c $f {{name}} && chown mosquitto:mosquitto $f && chmod 0700 $f'
+  docker compose kill -s HUP mqtt || true

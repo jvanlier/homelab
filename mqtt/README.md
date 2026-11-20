@@ -4,6 +4,9 @@ Single shared MQTT broker for the trusted internal services: zigbee2mqtt, teslam
 Home Assistant, and frigate (future). All of these are co-located on the Pi and
 communicate over a shared Docker bridge network or the host loopback — not the LAN.
 
+A second, separate listener accepts a few Wi-Fi devices (AWTRIX clocks on the IoT VLAN)
+over TLS with a login and per-device ACL. See [LAN listener](#lan-listener-tls-8883).
+
 ## Why a dedicated directory instead of living inside zigbee2mqtt-amb or teslamate
 
 No single service owns the broker — it is shared infrastructure used by at least four
@@ -14,7 +17,7 @@ makes the dependency explicit and the lifecycle independent.
 
 ## Security posture (loopback-bind, keep anonymous)
 
-The published port is bound to `127.0.0.1` only. This is deliberate and sufficient:
+This section covers the internal listener (1883). The internal port is bound to `127.0.0.1` only. This is deliberate and sufficient:
 
 - **zigbee2mqtt** and **teslamate** reach the broker container-to-container over the
   shared `mqtt` Docker bridge network — they never touch the published port.
@@ -51,7 +54,7 @@ the mapping was dead. It was dropped here rather than carried over.
 
 None of the current clients (zigbee2mqtt, teslamate, Home Assistant, frigate) need
 WebSockets — that transport only matters for browser-side / JavaScript MQTT clients. To
-add it later, declare a second listener in `mosquitto-no-auth.conf`:
+add it later, declare another listener in `mosquitto.conf`:
 
 ```
 listener 9001
@@ -60,6 +63,45 @@ allow_anonymous true
 ```
 
 and re-add `- "127.0.0.1:9001:9001"` to the compose `ports`.
+
+## LAN listener (TLS, 8883)
+
+Wi-Fi devices can't use the loopback listener, so `mosquitto.conf` adds a second
+listener with `per_listener_settings true`. That keeps the auth settings separate:
+
+| Listener | Published on          | Auth                        | Clients                     |
+|----------|-----------------------|-----------------------------|-----------------------------|
+| 1883     | `127.0.0.1`           | anonymous, full access      | HA, z2m, teslamate, frigate |
+| 8883     | `192.168.1.138` (LAN) | TLS + password + `acl.conf` | AWTRIX clocks               |
+
+- **TLS** keeps the password and messages unreadable on the network. The certificate is
+  self-signed and valid for 10 years. Clients trust it by pinning its SHA-256 fingerprint
+  (AWTRIX NG's **Trust** button), so there is no CA and no renewal.
+- **ACL**: a LAN user can only use `<username>/#` and publish its own HA discovery config
+  (`homeassistant/device/<client id>/config`). It cannot see or send zigbee, tesla or other
+  internal topics. Give each device's MQTT prefix the same value as its username.
+- **Firewall**: UniFi only allows specific IoT devices to reach `192.168.1.138:8883`
+  (see `docs/unifi-ucg-ultra.md`).
+- **Secrets** live in `mqtt/lan/` on the Pi (gitignored): `server.crt`, `server.key`, `passwd`.
+  The container entrypoint chowns them to the `mosquitto` user, so later edits on the host
+  need `sudo` or the `just` recipes.
+
+HA needs no changes: it stays on the internal listener and sees the device topics because
+both listeners share one broker.
+
+### Setup (once, on pi502 in `mqtt/`)
+
+Mosquitto refuses to start while the cert or password file is missing, so create them
+before restarting:
+
+```
+just tls-cert
+just add-user awtrix_kids_bedroom   # prompts for a password
+docker compose up -d                # recreates the container with port 8883
+just fingerprint                    # compare with the clock before pressing Trust
+```
+
+Add more devices with `just add-user <name>`. It reloads the broker, so no restart is needed.
 
 ## No cross-project `depends_on`
 
@@ -113,8 +155,9 @@ enabling frigate's MQTT integration in the future will require no port change.
 The two Duux fans (duux-fan-local) need their **own separate broker** and must NOT
 share this one. The fans are LAN Wi-Fi clients, so their broker must expose a
 LAN-routable TLS listener (spoofing the cloud host via Pi-hole DNS rewrite and a
-self-signed certificate). Adding that LAN listener to this loopback-only broker would
-re-open exactly the LAN exposure that Option A closes.
+self-signed certificate). That listener's fragile cloud-spoofing plumbing (below) is why
+the fans stay on their own broker, even though this broker now has a restricted LAN
+listener for AWTRIX.
 
 Keeping the brokers separate also limits blast radius: a LAN-exposed broker is the
 most-probed surface on the network, and the internal zigbee/tesla topics must remain

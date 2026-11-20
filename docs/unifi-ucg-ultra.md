@@ -278,11 +278,18 @@ The obsolete Default-network internet block for SlimmeLezer has been removed.
 
 ## Work not yet configured
 
-- Ulanzi TC002: connect with current/out-of-the-box firmware and test connectivity later.
-  Firmware flashing and HA integration are separate work.
+- Ulanzi TC002 (kid's bedroom), planned with AWTRIX NG and MQTT over TLS to the shared broker
+  (see `mqtt/README.md`, "LAN listener"). Not yet applied; move these to the tables above once verified:
+  - IoT SSID, DHCP reservation `192.168.20.80`.
+  - IoT → Internal: TC002 → pi502 `192.168.1.138` TCP 8883 (MQTT-TLS), above the block.
+    No HA (8123) access: voice is not used.
+  - No internet exception. NTP uses the shared allowance. Firmware updates are downloaded by
+    the browser on an authorized Mac and uploaded over TCP 80, so the clock never contacts
+    GitHub. Its one-time microphone-controller download from Ulanzi fails harmlessly and retries.
+  - Web UI over the existing Mac → IoT TCP 80 rule.
 - Duux fans: no VLAN move, broker migration or DNS changes made here.
-- IoT MQTT broker/bridge: separate work. Unencrypted MQTT is acceptable for that future setup;
-  TLS/certificate management is not planned.
+- IoT MQTT: devices use the shared broker's TLS listener on `192.168.1.138:8883` (self-signed
+  cert pinned by fingerprint, login and per-device ACL). Allow it per device; never for all IoT.
 - Per-device Wi-Fi passwords (PPSK) and wired port isolation can be considered separately.
 
 ## Reverting a migration
