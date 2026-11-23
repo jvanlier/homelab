@@ -47,7 +47,7 @@ from different pairs and should not be used to compare their execution order.
 
 Put exceptions above the corresponding block. Enable **Auto Allow Return Traffic** on
 Internal → IoT allows. External already has built-in return traffic handling, so that option
-is disabled for internet exceptions. Source ports remain Any: clients normally choose a
+is disabled for internet exceptions. Source ports remain Any unless specified: clients normally choose a
 temporary source port, while the destination port identifies the service being accessed.
 
 ### IoT → External
@@ -59,12 +59,17 @@ temporary source port, while the destination port identifies the service being a
 | Nest Protect | Any                         | Allow                       |
 | Eufy         | Any                         | Allow                       |
 | Tesla        | Any                         | Allow                       |
+| Denon        | TCP 80, 443, 4070           | Allow Spotify domains below |
 | All IoT      | UDP 123 (NTP)               | Allow                       |
 | All IoT      | Any                         | Block: `IoT block internet` |
 
 All exceptions precede the internet block, which precedes the built-in allow. Their relative
 order does not matter when they do not conflict. Internet exceptions do not grant access to
 Internal or gateway services.
+
+`Denon allow Spotify` uses Domain → Specific: `spotify.com`,
+`ap.single-gslb.spotify.com`, and `audio-ak-spotify-com.akamaized.net` (IPv4).
+The Denon also uses the shared NTP allowance.
 
 Devices without an internet exception (the shared NTP allowance still applies):
 
@@ -73,13 +78,15 @@ Devices without an internet exception (the shared NTP allowance still applies):
 
 ### IoT → Gateway
 
-| Source      | Destination   | Protocol / destination port | Action                     |
-|-------------|---------------|-----------------------------|----------------------------|
-| All IoT     | Gateway       | TCP/UDP 53                  | Allow DNS                  |
-| All IoT     | Gateway       | IPv4 UDP 67                 | Allow DHCP                 |
-| All IoT     | Gateway       | IPv4 ICMP Echo Request      | Allow connectivity checks  |
-| Tado bridge | `224.0.0.251` | IPv4 UDP 5353               | Allow mDNS                 |
-| All IoT     | Gateway       | Any other traffic           | Block: `IoT block gateway` |
+| Source      | Destination    | Protocol / destination port | Action                     |
+|-------------|----------------|-----------------------------|----------------------------|
+| All IoT     | Gateway        | TCP/UDP 53                  | Allow DNS                  |
+| All IoT     | Gateway        | IPv4 UDP 67                 | Allow DHCP                 |
+| All IoT     | Gateway        | IPv4 ICMP Echo Request      | Allow connectivity checks  |
+| Tado bridge | `224.0.0.251`  | IPv4 UDP 5353               | Allow mDNS                 |
+| Denon       | `224.0.0.251`  | IPv4 UDP 5353               | Allow multicast mDNS       |
+| Denon       | `192.168.20.1` | IPv4 UDP Any, source 5353   | Allow unicast mDNS replies |
+| All IoT     | Gateway        | Any other traffic           | Block: `IoT block gateway` |
 
 Gateway means services on the router itself, rather than traffic routed through it.
 Destination Any in this zone includes the router's addresses on its different networks.
@@ -95,6 +102,7 @@ Those events did not expose ICMP type/code. The configured exception allows **Ec
 | Four designated Mac interfaces | Any IoT                     | TCP 80, 443                 | Allow web interfaces + return traffic |
 | pi501 and pi502                | SlimmeLezer `192.168.20.40` | TCP 23                      | Allow DSMR + return traffic           |
 | pi501 and pi502                | Tado `192.168.20.60`        | TCP 80                      | Allow HomeKit + return traffic        |
+| All trusted clients            | Denon `192.168.20.70`       | Any                         | Allow + return traffic                |
 | All other Internal traffic     | IoT                         | Any                         | Block                                 |
 
 Mac interfaces are selected directly using UniFi's **Device** selector: three Wi-Fi interfaces
@@ -103,33 +111,36 @@ and one Ethernet interface. Both Pis are selected for the HA rules.
 Tado advertises **TCP 80** for HomeKit. The HA → Tado rule is restricted to that destination
 port, and operation has been verified.
 
-### Other directions
+### IoT → Internal
 
-- IoT → Internal blocks new connections. Automatic return rules permit replies to authorized
-  Internal connections.
+`Denon allow AirPlay UDP to trusted` permits the Denon device to send UDP on any port
+to Default (`192.168.1.0/24`), above the block. Auto Allow Return Traffic is enabled;
+its generated return policy appears under Internal → IoT.
+All other new IoT → Internal connections are blocked. Automatic return rules permit
+replies to authorized Internal connections.
+
+### Other directions
 - IoT → VPN, Hotspot and DMZ are blocked, as are connections from those zones to IoT.
 - Gateway → IoT retains the built-in allow.
 - No MQTT or Duux-specific openings or DNS changes are part of this setup.
 
-## HomeKit discovery
+## Service discovery
 
-HA on Default needs to discover the Tado HomeKit bridge on IoT. Since mDNS normally stays
-within one VLAN, the gateway proxy relays HomeKit discovery between these networks.
+The gateway mDNS proxy relays discovery between Default and IoT for Tado HomeKit and
+Denon AirPlay / Spotify Connect.
 
 UniFi **Settings → Networks → Gateway mDNS Proxy**:
 
 - Mode: **Custom**.
 - VLAN scope: **Default (1)** and **IoT (20)**.
-- Service scope: **Specific → HomeKit only** (`_hap._tcp`).
+- Service scope: **Specific → HomeKit, AirPlay, Spotify Connect**.
 
 The separate HA → Tado TCP rule allows the actual connection.
 
-`224.0.0.251` is the IPv4 mDNS multicast destination, using UDP 5353. The Tado → Gateway
-exception must precede the gateway block, which otherwise overrides the built-in mDNS allow.
-
-AirPlay and AirDrop are excluded from cross-VLAN reflection. Their discovery within Default
-is unaffected. Global IGMP snooping, L3 Network Isolation (ACL), Device Isolation (ACL) and
-other switch defaults were left unchanged.
+`224.0.0.251` is the IPv4 mDNS multicast destination, using UDP 5353. The Tado and Denon
+Gateway exceptions must precede the gateway block. AirDrop is excluded from reflection.
+Global IGMP snooping, L3 Network Isolation (ACL), Device Isolation (ACL) and other switch
+defaults were left unchanged.
 
 ## Wired ports
 
@@ -147,15 +158,25 @@ isolation; check switch-specific behavior before applying it, especially across 
 
 Device addresses are fixed through DHCP reservations.
 
-| Device                    | IoT address     | Integration / access                  |
-|---------------------------|-----------------|---------------------------------------|
-| Kindle                    | `192.168.20.10` | Internet for downloads and syncing    |
-| Roborock Qrevo Edge 2 Pro | `192.168.20.20` | Roborock app; no HA integration       |
-| SlimmeLezer / P1 reader   | `192.168.20.40` | HA DSMR over TCP 23; web UI on TCP 80 |
-| Tado Internet Bridge      | `192.168.20.60` | HA HomeKit over TCP 80; no internet   |
-| Nest Protect              | `192.168.20.30` | Nest app; internet exception          |
-| Eufy                      | `192.168.20.50` | Internet allowed; no HA integration   |
-| Tesla                     | Not recorded    | Internet allowed                      |
+| Device                    | IoT address     | Integration / access                        |
+|---------------------------|-----------------|---------------------------------------------|
+| Kindle                    | `192.168.20.10` | Internet for downloads and syncing          |
+| Roborock Qrevo Edge 2 Pro | `192.168.20.20` | Roborock app; no HA integration             |
+| SlimmeLezer / P1 reader   | `192.168.20.40` | HA DSMR over TCP 23; web UI on TCP 80       |
+| Tado Internet Bridge      | `192.168.20.60` | HA HomeKit over TCP 80; no internet         |
+| Nest Protect              | `192.168.20.30` | Nest app; internet exception                |
+| Eufy                      | `192.168.20.50` | Internet allowed; no HA integration         |
+| Tesla                     | Not recorded    | Internet allowed                            |
+| Denon AVR-X3000           | `192.168.20.70` | AirPlay; Spotify Connect internet exception |
+
+### Denon AVR-X3000
+
+Wired through a USW Flex Mini with native IoT VLAN and tagged VLANs blocked.
+AirPlay and Spotify Connect work from trusted clients. Internet access is restricted
+to the Spotify domain/port rule and shared NTP allowance.
+On the iPhone's trusted Wi-Fi connection, disable **Limit IP Address Tracking**
+(Settings → Wi-Fi → ⓘ) for HTTP access to the receiver.
+See [Denon networking findings](denon-avr-x3000.md) for verification and troubleshooting.
 
 ### Roborock
 
